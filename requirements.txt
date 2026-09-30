@@ -1,0 +1,7 @@
+aiohttp>=3.10
+pywin32>=306
+Pillow>=11
+pystray>=0.19
+qrcode>=8
+pillow-heif>=0.18  # HEIC-фото с iPhone
+striprtf>=0.0.26  # форматированный текст из «Быстрых команд»

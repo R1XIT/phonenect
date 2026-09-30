@@ -1,0 +1,9 @@
+{
+  "name": "Phonenect",
+  "short_name": "Phonenect",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#111214",
+  "theme_color": "#2563eb",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

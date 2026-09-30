@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phonenect — подключение</title>
+<style>
+  :root { --bg: #f5f6f8; --card: #fff; --text: #16181d; --muted: #6b7180; --line: #e3e5ea; --accent: #2563eb; color-scheme: light; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111214; --card: #1b1d21; --text: #eceef2; --muted: #9096a3; --line: #2b2e34; --accent: #4f8cff; color-scheme: dark; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Segoe UI", system-ui, sans-serif; padding: 32px 16px; }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 { font-size: 17px; margin: 0 0 10px; }
+  .lead { color: var(--muted); margin: 0 0 24px; }
+  .grid { display: grid; grid-template-columns: auto 1fr; gap: 24px; align-items: center; }
+  @media (max-width: 620px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  .qr { background: #fff; padding: 12px; border-radius: 10px; width: 240px; height: 240px; }
+  .qr img { width: 100%; height: 100%; display: block; }
+  code { font: 13px/1.5 Consolas, monospace; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+         padding: 2px 6px; word-break: break-all; }
+  .copy { display: flex; gap: 8px; align-items: center; margin: 6px 0 14px; }
+  .copy code { flex: 1; padding: 8px 10px; }
+  button { font: inherit; font-size: 13px; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--card); color: var(--text); cursor: pointer; }
+  ol { padding-left: 20px; margin: 8px 0; }
+  li { margin: 6px 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Подключить телефон</h1>
+  <p class="lead">Телефон и ПК должны быть в одной сети Wi-Fi.</p>
+
+  <section class="card grid">
+    <div class="qr"><img src="/pair/qr.svg" alt="QR-код для подключения"></div>
+    <div>
+      <h2>Android и iPhone: веб-клиент</h2>
+      <ol>
+        <li>Наведите камеру телефона на QR-код и откройте ссылку.</li>
+        <li>Добавьте страницу на главный экран: в Safari «Поделиться → На экран „Домой“», в Chrome «⋮ → Добавить на главный экран».</li>
+        <li>Всё, что копируется на ПК, появляется на странице; по кнопке «Отправить» текст или фото уходит в буфер ПК.</li>
+      </ol>
+      <div class="copy"><code id="pair">{{PAIR_URL}}</code><button data-copy="pair">Копировать</button></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>iPhone: «Быстрые команды» и двойной тап по крышке</h2>
+    <p class="muted">Так получается ближе всего к Universal Clipboard: без открытия страниц.</p>
+    <p>Адрес API (с токеном):</p>
+    <div class="copy"><code id="api">{{API_URL}}</code><button data-copy="api">Копировать</button></div>
+
+    <p><b>Команда «На ПК»</b> отправляет буфер iPhone на компьютер:</p>
+    <ol>
+      <li>Детали команды (ⓘ): включите «Показывать в меню „Поделиться“», а в строке «Если нет входных данных»
+        выберите <b>«Получить буфер обмена»</b>.</li>
+      <li>Действие «Получить содержимое URL»: вставьте адрес API, метод <b>POST</b>, тело запроса <b>Файл</b>,
+        файл — <b>Ввод команды</b>.</li>
+    </ol>
+    <p class="muted">Адреса удобнее копировать прямо на iPhone: в веб-клиенте есть раздел «Быстрые команды для iPhone».</p>
+
+    <p><b>Команда «С ПК»</b> забирает буфер компьютера:</p>
+    <ol>
+      <li>Действие «Получить содержимое URL»: адрес API, метод <b>GET</b>.</li>
+      <li>Действие «Скопировать в буфер обмена».</li>
+    </ol>
+
+    <p>Назначьте команды на жест: <b>Настройки → Универсальный доступ → Касание → Касание задней панели</b>
+      (двойное касание — «На ПК», тройное — «С ПК»). При первом запуске разрешите доступ к локальной сети.</p>
+  </section>
+
+  <section class="card">
+    <h2>Android: одно касание</h2>
+    <p>Приложение <b>HTTP Shortcuts</b> (бесплатное, с открытым кодом): создайте ярлык с методом POST на адрес API,
+      телом запроса сделайте переменную типа «Буфер обмена», тип содержимого <code>text/plain</code>. Для обратного направления: GET на тот же
+      адрес и действие «скопировать ответ в буфер». Ярлыки можно вынести на главный экран или в плитки быстрых настроек.</p>
+  </section>
+
+  <p class="muted">Токен хранится в %APPDATA%\phonenect\config.json. Если удалить поле <code>token</code> и перезапустить
+    Phonenect, все подключённые устройства потеряют доступ.</p>
+</main>
+<script>
+  document.querySelectorAll("[data-copy]").forEach((b) => {
+    b.onclick = async () => {
+      await navigator.clipboard.writeText(document.getElementById(b.dataset.copy).textContent);
+      b.textContent = "Скопировано";
+      setTimeout(() => (b.textContent = "Копировать"), 1500);
+    };
+  });
+</script>
+</body>
+</html>

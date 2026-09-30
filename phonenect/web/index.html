@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Phonenect">
+<meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111214" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
+<title>Phonenect</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #16181d; --muted: #6b7180; --line: #e3e5ea;
+    --accent: #2563eb; --accent-text: #fff; --ok: #16a34a; --bad: #dc2626;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111214; --card: #1b1d21; --text: #eceef2; --muted: #9096a3; --line: #2b2e34;
+      --accent: #4f8cff; --accent-text: #fff; color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color: transparent;
+  }
+  main { max-width: 560px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 18px 0 14px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.02em; }
+  .status { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
+  .status.on .dot { background: var(--ok); }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .send textarea {
+    width: 100%; min-height: 84px; resize: vertical; border: 0; outline: 0; background: transparent;
+    color: inherit; font: inherit;
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  button, .btn {
+    appearance: none; border: 1px solid var(--line); background: var(--card); color: var(--text);
+    font: inherit; font-size: 15px; font-weight: 500; padding: 9px 14px; border-radius: 10px;
+    cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:active, .btn:active { transform: scale(0.97); }
+  button:disabled { opacity: 0.5; }
+  .grow { flex: 1; }
+
+  h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+       color: var(--muted); margin: 26px 0 10px; }
+  .list { display: flex; flex-direction: column; gap: 10px; }
+  .clip .meta { font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; margin-bottom: 8px; }
+  .clip .from-pc { color: var(--accent); font-weight: 600; }
+  .clip .text {
+    white-space: pre-wrap; word-break: break-word; max-height: 9.5em; overflow: hidden;
+    -webkit-mask-image: linear-gradient(#000 75%, transparent);
+  }
+  .clip .text.short { -webkit-mask-image: none; }
+  .clip img { display: block; max-width: 100%; max-height: 320px; border-radius: 8px; margin: 0 auto; }
+  .clip.fresh { border-color: var(--accent); }
+  .empty { color: var(--muted); text-align: center; padding: 28px 0; }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 6px; }
+
+  .setup { margin-top: 16px; }
+  .setup summary { font-weight: 600; cursor: pointer; }
+  .setup h3 { font-size: 15px; margin: 18px 0 6px; }
+  .setup ol { padding-left: 20px; margin: 8px 0; }
+  .setup li { margin: 5px 0; }
+  .setup code {
+    flex: 1; min-width: 0; font: 12px/1.4 ui-monospace, Menlo, monospace; word-break: break-all;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+  }
+  .setup .row { align-items: center; }
+  .setup .row:has(code) { margin-top: 0; flex-wrap: nowrap; }
+  .setup .manual { margin-top: 16px; }
+  .setup .manual summary { font-weight: 500; color: var(--muted); }
+
+  .toast {
+    position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+    background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 12px; font-size: 15px;
+    max-width: calc(100% - 32px); box-shadow: 0 6px 24px rgb(0 0 0 / 0.2);
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Phonenect</h1>
+    <div class="status" id="status"><span class="dot"></span><span id="status-text">Подключение…</span></div>
+  </header>
+
+  <section class="card send">
+    <textarea id="input" placeholder="Вставьте текст или картинку и отправьте на ПК"></textarea>
+    <div class="row">
+      <button class="primary grow" id="send">Отправить на ПК</button>
+      <button id="paste" hidden>Из буфера</button>
+      <label class="btn" for="file">Фото</label>
+      <input type="file" id="file" accept="image/*" hidden>
+    </div>
+  </section>
+
+  <details class="card setup" id="setup">
+    <summary>Быстрые команды для iPhone</summary>
+    <p class="hint">Нажмите кнопку: адрес скопируется, а iPhone предложит добавить команду.
+      Когда «Команды» спросят адрес Phonenect, вставьте его (долгое нажатие → «Вставить»).</p>
+    <div class="row">
+      <button class="primary grow" data-shortcut="to-pc">Добавить «На ПК»</button>
+      <button class="primary grow" data-shortcut="from-pc">Добавить «С ПК»</button>
+    </div>
+    <p class="hint">«На ПК» отправляет буфер iPhone (или то, чем поделились) на компьютер.
+      «С ПК» кладёт буфер компьютера в буфер iPhone.</p>
+
+    <h3>Жест</h3>
+    <p>Настройки → Универсальный доступ → Касание → <b>Касание задней панели</b>:
+      двойное касание — «На ПК», тройное — «С ПК». При первом запуске разрешите доступ к локальной сети.</p>
+
+    <h3>Адрес Phonenect</h3>
+    <div class="row"><code id="url-get"></code><button data-copy="url-get">Скопировать</button></div>
+
+    <details class="manual">
+    <summary>Собрать команды вручную</summary>
+    <h3>«На ПК»: отправить буфер iPhone</h3>
+    <ol>
+      <li>Детали команды (ⓘ): включите «Показывать в меню „Поделиться“», типы: изображения, текст, URL.
+        В строке «Если нет входных данных» выберите <b>«Получить буфер обмена»</b>.</li>
+      <li>Добавьте «Получить содержимое URL», вставьте адрес Phonenect. Раскройте параметры:
+        метод <b>POST</b>, тело запроса <b>Файл</b>, файл: <b>Ввод команды</b>.</li>
+      <li>Добавьте «Показать уведомление» с текстом «Отправлено на ПК».</li>
+    </ol>
+
+    <h3>«С ПК»: забрать буфер компьютера</h3>
+    <ol>
+      <li>«Получить содержимое URL» с адресом Phonenect (метод GET, ничего менять не нужно).</li>
+      <li>«Скопировать в буфер обмена».</li>
+      <li>«Показать уведомление» с текстом «Скопировано с ПК».</li>
+    </ol>
+    </details>
+  </details>
+
+  <h2>Общий буфер</h2>
+  <div class="list" id="list"><div class="empty">Скопируйте что-нибудь на ПК — оно появится здесь</div></div>
+</main>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const secure = window.isSecureContext && navigator.clipboard;
+const device = /iPad/.test(navigator.userAgent) ? "iPad"
+  : /iPhone/.test(navigator.userAgent) ? "iPhone"
+  : /Android/.test(navigator.userAgent) ? "Android" : "Браузер";
+let clips = [];
+let freshId = null;
+
+// ---------- уведомления ----------
+let toastTimer;
+function toast(text, ms = 2200) {
+  const t = $("toast");
+  t.textContent = text;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), ms);
+}
+
+// ---------- копирование на телефоне ----------
+async function copyText(text) {
+  if (secure) {
+    try { await navigator.clipboard.writeText(text); return true; } catch {}
+  }
+  // Запасной путь для http: скрытое поле + execCommand (работает по нажатию в Safari и Chrome).
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;font-size:16px";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.setSelectionRange(0, text.length);
+  const ok = document.execCommand("copy");
+  ta.remove();
+  return ok;
+}
+
+async function copyImage(clip) {
+  if (secure && window.ClipboardItem) {
+    try {
+      const blob = fetch(`/api/clip/${clip.id}`).then((r) => r.blob())
+        .then((b) => b.type === "image/png" ? b : toPng(b));
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      return true;
+    } catch {}
+  }
+  return false;
+}
+
+function toPng(blob) {
+  return createImageBitmap(blob).then((bmp) => {
+    const c = document.createElement("canvas");
+    c.width = bmp.width; c.height = bmp.height;
+    c.getContext("2d").drawImage(bmp, 0, 0);
+    return new Promise((res) => c.toBlob(res, "image/png"));
+  });
+}
+
+async function copyClip(clip) {
+  const ok = clip.kind === "text" ? await copyText(clip.text) : await copyImage(clip);
+  if (ok) toast("Скопировано");
+  else if (clip.kind === "image") toast("Удерживайте картинку → «Скопировать»", 3500);
+  else toast("Не удалось скопировать");
+  if (clip.id === freshId) { freshId = null; render(); }
+}
+
+// ---------- отправка на ПК ----------
+async function send(body, type) {
+  $("send").disabled = true;
+  try {
+    const r = await fetch(`/api/clip?from=${encodeURIComponent(device)}`, {
+      method: "POST", body, headers: type ? { "Content-Type": type } : {},
+    });
+    if (!r.ok) throw new Error(await r.text());
+    toast("Отправлено на ПК");
+    return true;
+  } catch (e) {
+    toast("Ошибка: " + e.message, 3500);
+    return false;
+  } finally {
+    $("send").disabled = false;
+  }
+}
+
+$("send").onclick = async () => {
+  const text = $("input").value;
+  if (!text.trim()) return $("input").focus();
+  if (await send(text, "text/plain; charset=utf-8")) $("input").value = "";
+};
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) $("send").click();
+});
+// Вставили картинку в поле — сразу отправляем.
+$("input").addEventListener("paste", (e) => {
+  const file = [...(e.clipboardData?.files || [])].find((f) => f.type.startsWith("image/"));
+  if (file) { e.preventDefault(); send(file, file.type); }
+});
+$("file").onchange = (e) => {
+  const file = e.target.files[0];
+  if (file) send(file, file.type);
+  e.target.value = "";
+};
+if (secure && navigator.clipboard.read) {
+  $("paste").hidden = false;
+  $("paste").onclick = async () => {
+    try {
+      for (const item of await navigator.clipboard.read()) {
+        const img = item.types.find((t) => t.startsWith("image/"));
+        if (img) return send(await item.getType(img), img);
+        if (item.types.includes("text/plain")) {
+          return send(await (await item.getType("text/plain")).text(), "text/plain; charset=utf-8");
+        }
+      }
+    } catch { toast("Нет доступа к буферу"); }
+  };
+}
+
+// ---------- быстрые команды ----------
+const API_URL = "{{API_URL}}";
+$("url-get").textContent = API_URL;
+document.querySelectorAll("[data-copy]").forEach((b) => {
+  b.onclick = async () => {
+    if (await copyText($(b.dataset.copy).textContent)) toast("Адрес скопирован");
+  };
+});
+// Копируем адрес (его спросит импорт команды) и открываем подписанный файл команды.
+document.querySelectorAll("[data-shortcut]").forEach((b) => {
+  b.onclick = async () => {
+    await copyText(API_URL);
+    toast("Адрес скопирован — вставьте его, когда «Команды» спросят", 5000);
+    setTimeout(() => { location.href = `/shortcuts/${b.dataset.shortcut}.shortcut`; }, 400);
+  };
+});
+// Первый раз на iPhone раскрываем инструкцию сами.
+if (device === "iPhone" || device === "iPad") {
+  try { $("setup").open = !localStorage.getItem("pn-setup-seen"); } catch {}
+}
+$("setup").addEventListener("toggle", () => { try { localStorage.setItem("pn-setup-seen", "1"); } catch {} });
+
+// ---------- список ----------
+function timeAgo(ts) {
+  const s = Math.round(Date.now() / 1000 - ts);
+  if (s < 60) return "только что";
+  if (s < 3600) return `${Math.floor(s / 60)} мин назад`;
+  return new Date(ts * 1000).toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" });
+}
+
+function render() {
+  const list = $("list");
+  if (!clips.length) return;
+  list.replaceChildren(...clips.map((clip) => {
+    const el = document.createElement("article");
+    el.className = "card clip" + (clip.id === freshId ? " fresh" : "");
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const from = document.createElement("span");
+    from.textContent = clip.source;
+    if (clip.source === "ПК") from.className = "from-pc";
+    const when = document.createElement("span");
+    when.textContent = timeAgo(clip.ts);
+    meta.append(from, when);
+    el.append(meta);
+
+    if (clip.kind === "text") {
+      const t = document.createElement("div");
+      t.className = "text" + (clip.text.length < 300 && clip.text.split("\n").length < 7 ? " short" : "");
+      t.textContent = clip.text;
+      el.append(t);
+    } else {
+      const img = document.createElement("img");
+      img.src = `/api/clip/${clip.id}`;
+      img.alt = "Картинка из буфера";
+      img.loading = "lazy";
+      el.append(img);
+    }
+
+    const row = document.createElement("div");
+    row.className = "row";
+    const copy = document.createElement("button");
+    copy.className = clip.id === freshId ? "primary grow" : "grow";
+    copy.textContent = "Скопировать";
+    copy.onclick = () => copyClip(clip);
+    row.append(copy);
+    if (clip.kind === "image") {
+      const open = document.createElement("a");
+      open.className = "btn";
+      open.href = `/api/clip/${clip.id}`;
+      open.target = "_blank";
+      open.textContent = "Открыть";
+      row.append(open);
+    } else if (/^https?:\/\/\S+$/.test(clip.text.trim())) {
+      const open = document.createElement("a");
+      open.className = "btn";
+      open.href = clip.text.trim();
+      open.target = "_blank";
+      open.rel = "noopener";
+      open.textContent = "Открыть ссылку";
+      row.append(open);
+    }
+    el.append(row);
+    return el;
+  }));
+}
+
+// ---------- живое соединение ----------
+function setStatus(on) {
+  $("status").classList.toggle("on", on);
+  $("status-text").textContent = on ? "Связь с ПК" : "Нет связи";
+}
+
+function connect() {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.onopen = () => setStatus(true);
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.event === "history") clips = msg.clips;
+    if (msg.event === "clip") {
+      clips = [msg.clip, ...clips.filter((c) => c.id !== msg.clip.id)].slice(0, 30);
+      if (msg.clip.source === "ПК") {
+        freshId = msg.clip.id;
+        if (navigator.vibrate) navigator.vibrate(30);
+        toast("Новое с ПК — нажмите «Скопировать»");
+      }
+    }
+    render();
+  };
+  ws.onclose = () => { setStatus(false); setTimeout(connect, 2000); };
+}
+connect();
+setInterval(render, 30000);
+// Вернулись на вкладку — соединение могло умереть в фоне.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) render(); });
+</script>
+</body>
+</html>
