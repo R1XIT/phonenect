@@ -1,6 +1,7 @@
 """HTTP API + WebSocket + веб-клиент для телефонов."""
 import hmac
 import io
+import json
 from pathlib import Path
 from urllib.parse import quote
 
@@ -8,6 +9,7 @@ import qrcode
 import qrcode.image.svg
 from aiohttp import WSMsgType, web
 
+from . import config
 from .hub import Hub
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -15,7 +17,13 @@ COOKIE = "pn_token"
 LOCAL_ONLY = {"/pair", "/pair/qr.svg"}
 PUBLIC = {"/manifest.webmanifest", "/icon.svg"}
 MAX_BODY = 50 * 1024 * 1024
-SHORTCUT_NAMES = {"to-pc": "На ПК", "from-pc": "С ПК"}
+SHORTCUT_NAMES = {
+    "to-pc": "На ПК",
+    "from-pc": "С ПК",
+    "auto-to-pc": "Авто — На ПК",
+    "auto-from-pc": "Авто — С ПК",
+}
+DEFAULT_MAX_AGE = 120  # секунд: более старый буфер ПК автоматизация не подхватит
 
 
 def create_app(hub: Hub, cfg: dict, base_url: str) -> web.Application:
@@ -38,6 +46,7 @@ def create_app(hub: Hub, cfg: dict, base_url: str) -> web.Application:
         elif (
             request.path not in PUBLIC
             and not request.path.startswith("/shortcuts/")
+            and request.path != "/android/phonenect.apk"
             and not authorized(request)
         ):
             raise web.HTTPUnauthorized(
@@ -57,6 +66,9 @@ def create_app(hub: Hub, cfg: dict, base_url: str) -> web.Application:
         # Адрес API — тот, по которому телефон нас реально видит (для «Быстрых команд»).
         html = (WEB_DIR / "index.html").read_text("utf-8")
         html = html.replace("{{API_URL}}", f"http://{request.host}/api/clip?t={token}")
+        html = html.replace("{{MDNS_URL}}", f"http://{config.MDNS_HOST}:{cfg['port']}/api/clip?t={token}")
+        # Имя сети попадает в JS-строку — экранируем как JSON (и «<», чтобы не закрыть </script>).
+        html = html.replace('"{{WIFI}}"', json.dumps(config.wifi_ssid() or "").replace("<", "\\u003c"))
         return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-cache"})
 
     def raw(clip):
@@ -69,7 +81,17 @@ def create_app(hub: Hub, cfg: dict, base_url: str) -> web.Application:
             headers={"X-Clip-Id": str(clip.id), "Cache-Control": "no-store"},
         )
 
+    def flag(request: web.Request, header: str, query: str) -> bool:
+        return (request.headers.get(header) or request.query.get(query) or "") in ("1", "true", "yes")
+
     async def get_latest(request):
+        if flag(request, "X-Only-New", "new"):
+            # Для автоматизаций: пустой ответ, если нового для этого устройства нет.
+            max_age = float(request.headers.get("X-Max-Age") or request.query.get("max_age") or DEFAULT_MAX_AGE)
+            clip = hub.take_new(source_name(request), max_age)
+            if clip is None:
+                return web.Response(status=204)
+            return raw(clip)
         return raw(hub.latest)
 
     async def get_clip(request):
@@ -91,7 +113,9 @@ def create_app(hub: Hub, cfg: dict, base_url: str) -> web.Application:
             ctype = request.content_type
         if not body:
             raise web.HTTPBadRequest(text="Пустой запрос")
-        clip = await hub.add_remote(body, ctype, source_name(request))
+        clip = await hub.add_remote(body, ctype, source_name(request), auto=flag(request, "X-Auto", "auto"))
+        if clip is None:
+            return web.json_response({"skipped": True})
         return web.json_response(clip.meta())
 
     async def websocket(request: web.Request):
@@ -137,6 +161,19 @@ def create_app(hub: Hub, cfg: dict, base_url: str) -> web.Application:
             },
         )
 
+    async def apk(request):
+        # Приложение без секретов внутри — адрес и токен оно получает по ссылке phonenect://pair.
+        path = WEB_DIR / "android" / "phonenect.apk"
+        if not path.exists():
+            raise web.HTTPNotFound(text="Приложение ещё не собрано")
+        return web.FileResponse(
+            path,
+            headers={
+                "Content-Type": "application/vnd.android.package-archive",
+                "Content-Disposition": 'attachment; filename="phonenect.apk"',
+            },
+        )
+
     async def static(request):
         return web.FileResponse(WEB_DIR / request.path.lstrip("/"))
 
@@ -152,6 +189,7 @@ def create_app(hub: Hub, cfg: dict, base_url: str) -> web.Application:
             web.get("/pair", pair),
             web.get("/pair/qr.svg", pair_qr),
             web.get("/shortcuts/{slug}.shortcut", shortcut),
+            web.get("/android/phonenect.apk", apk),
             web.get("/manifest.webmanifest", static),
             web.get("/icon.svg", static),
         ]

@@ -10,8 +10,9 @@ import winreg
 from aiohttp import web
 from PIL import Image, ImageDraw
 
-from . import config
+from . import android_setup, config
 from .hub import Hub
+from .mdns import Advertiser
 from .server import create_app
 
 
@@ -71,11 +72,20 @@ def tray_icon() -> Image.Image:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="phonenect")
     parser.add_argument("--no-tray", action="store_true", help="без иконки в трее (консольный режим)")
+    parser.add_argument("--setup-android", action="store_true", help="настроить Android-телефон по USB и выйти")
     args = parser.parse_args()
 
     cfg = config.load()
     base_url = f"http://{config.lan_ip(cfg)}:{cfg['port']}"
     local_pair = f"http://127.0.0.1:{cfg['port']}/pair"
+
+    if args.setup_android:
+        try:
+            print("Готово:", android_setup.setup(base_url, cfg["token"]))
+        except android_setup.SetupError as e:
+            print("Ошибка:", e)
+            sys.exit(1)
+        return
 
     hub = Hub()
     ready = threading.Event()
@@ -85,6 +95,8 @@ def main() -> None:
         print(f"Не удалось занять порт {cfg['port']}: {hub.error}. Phonenect уже запущен?")
         sys.exit(1)
     threading.Thread(target=hub.watch_clipboard, daemon=True).start()
+    mdns = Advertiser(cfg)
+    threading.Thread(target=mdns.run, daemon=True).start()
 
     print(f"Phonenect запущен: {base_url}")
     print(f"Подключить телефон (QR): {local_pair}")
@@ -101,8 +113,22 @@ def main() -> None:
     def toggle_pause(icon, item):
         hub.paused = not hub.paused
 
+    def setup_android(icon, item):
+        def work():
+            notify = lambda text: icon.notify(text, "Phonenect")
+            try:
+                model = android_setup.setup(base_url, cfg["token"], log=notify)
+                notify(f"{model} настроен: буфер теперь общий автоматически.")
+            except android_setup.SetupError as e:
+                notify(str(e))
+            except Exception as e:
+                notify(f"Не получилось: {e}")
+
+        threading.Thread(target=work, daemon=True).start()
+
     def quit_app(icon, item):
         hub.stop()
+        mdns.stop()
         icon.stop()
 
     icon = pystray.Icon(
@@ -111,6 +137,7 @@ def main() -> None:
         "Phonenect — общий буфер",
         menu=pystray.Menu(
             pystray.MenuItem("Подключить телефон…", lambda: webbrowser.open(local_pair), default=True),
+            pystray.MenuItem("Настроить Android по USB", setup_android),
             pystray.MenuItem("Пауза синхронизации", toggle_pause, checked=lambda item: hub.paused),
             pystray.MenuItem("Запускать вместе с Windows", toggle_autostart, checked=lambda item: autostart_enabled()),
             pystray.MenuItem("Открыть папку настроек", lambda: os.startfile(config.CONFIG_DIR)),

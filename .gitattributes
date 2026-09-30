@@ -1,0 +1,6 @@
+# gradlew запускается в sh — ему нужны LF-переносы, иначе он не работает на Linux/macOS.
+android/gradlew text eol=lf
+*.bat text eol=crlf
+*.apk binary
+*.shortcut binary
+*.jar binary

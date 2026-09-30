@@ -32,7 +32,7 @@
   }
   main { max-width: 560px; margin: 0 auto; }
   header { display: flex; align-items: center; justify-content: space-between; padding: 18px 0 14px; }
-  h1 { font-size: 22px; margin: 0; letter-spacing: -0.02em; }
+  h1 { font-size: 24px; margin: 0; letter-spacing: -0.02em; }
   .status { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
   .status.on .dot { background: var(--ok); }
@@ -45,7 +45,7 @@
   .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   button, .btn {
     appearance: none; border: 1px solid var(--line); background: var(--card); color: var(--text);
-    font: inherit; font-size: 15px; font-weight: 500; padding: 9px 14px; border-radius: 10px;
+    font: inherit; font-size: 16px; font-weight: 500; padding: 9px 14px; border-radius: 10px;
     cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
   }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
@@ -70,11 +70,11 @@
 
   .setup { margin-top: 16px; }
   .setup summary { font-weight: 600; cursor: pointer; }
-  .setup h3 { font-size: 15px; margin: 18px 0 6px; }
+  .setup h3 { font-size: 16px; margin: 18px 0 6px; }
   .setup ol { padding-left: 20px; margin: 8px 0; }
   .setup li { margin: 5px 0; }
   .setup code {
-    flex: 1; min-width: 0; font: 12px/1.4 ui-monospace, Menlo, monospace; word-break: break-all;
+    flex: 1; min-width: 0; font: 13px/1.4 ui-monospace, Menlo, monospace; word-break: break-all;
     background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px;
   }
   .setup .row { align-items: center; }
@@ -84,7 +84,7 @@
 
   .toast {
     position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
-    background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 12px; font-size: 15px;
+    background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 12px; font-size: 16px;
     max-width: calc(100% - 32px); box-shadow: 0 6px 24px rgb(0 0 0 / 0.2);
   }
 </style>
@@ -106,6 +106,25 @@
     </div>
   </section>
 
+  <details class="card setup" id="android">
+    <summary>Приложение для Android: всё автоматически</summary>
+    <p class="hint">Приложение само кладёт скопированное на ПК в буфер телефона и отправляет на ПК то,
+      что копируете на телефоне, — без кнопок.</p>
+    <h3>Проще всего — по USB</h3>
+    <ol>
+      <li>На телефоне: Настройки → «О телефоне» → 7 раз нажмите «Номер сборки», затем
+        «Для разработчиков» → включите <b>«Отладка по USB»</b>.</li>
+      <li>Подключите телефон кабелем к ПК и в трее Phonenect выберите <b>«Настроить Android по USB»</b>.
+        ПК сам установит и подключит приложение.</li>
+    </ol>
+    <h3>Или вручную</h3>
+    <div class="row">
+      <a class="btn grow" href="/android/phonenect.apk">Скачать приложение</a>
+      <button class="primary grow" id="android-pair">Подключить приложение</button>
+    </div>
+    <p class="hint">Без настройки по USB буфер телефона уходит на ПК, когда вы открываете приложение.</p>
+  </details>
+
   <details class="card setup" id="setup">
     <summary>Быстрые команды для iPhone</summary>
     <p class="hint">Нажмите кнопку: адрес скопируется, а iPhone предложит добавить команду.
@@ -120,6 +139,22 @@
     <h3>Жест</h3>
     <p>Настройки → Универсальный доступ → Касание → <b>Касание задней панели</b>:
       двойное касание — «На ПК», тройное — «С ПК». При первом запуске разрешите доступ к локальной сети.</p>
+
+    <h3>Автоматически, без жестов</h3>
+    <p class="hint">Открыли приложение — в буфере iPhone уже то, что вы только что скопировали на ПК.
+      Закрыли — скопированное на iPhone ушло на ПК. Работает только в домашнем Wi-Fi, вне дома команды молчат.</p>
+    <div class="row">
+      <button class="primary grow" data-shortcut="auto-from-pc">Добавить «Авто — С ПК»</button>
+      <button class="primary grow" data-shortcut="auto-to-pc">Добавить «Авто — На ПК»</button>
+    </div>
+    <p class="hint">При добавлении «Команды» спросят название Wi-Fi: <b id="wifi-name">—</b>, а затем адрес (вставьте).</p>
+    <ol>
+      <li>«Команды» → вкладка <b>Автоматизация</b> → <b>+</b> → <b>Приложение</b>. Выберите приложения, где чаще всего вставляете
+        (Telegram, Заметки, Safari…), отметьте <b>«Открыто»</b> и <b>«Выполнять сразу»</b> → команда «Авто — С ПК».</li>
+      <li>Ещё одна автоматизация: те же приложения, <b>«Закрыто»</b>, «Выполнять сразу» → «Авто — На ПК».</li>
+      <li>Чтобы iPhone не спрашивал разрешения на вставку: Настройки → Приложения → Команды →
+        <b>Вставка из других приложений</b> → <b>Разрешить</b>.</li>
+    </ol>
 
     <h3>Адрес Phonenect</h3>
     <div class="row"><code id="url-get"></code><button data-copy="url-get">Скопировать</button></div>
@@ -267,8 +302,18 @@ if (secure && navigator.clipboard.read) {
 }
 
 // ---------- быстрые команды ----------
-const API_URL = "{{API_URL}}";
+let API_URL = "{{API_URL}}";
+const MDNS_URL = "{{MDNS_URL}}";
 $("url-get").textContent = API_URL;
+$("wifi-name").textContent = "{{WIFI}}" || "имя вашей сети";
+// Если iPhone видит ПК по имени phonenect.local — даём командам его: смена IP их не сломает.
+if (!location.host.startsWith("phonenect.local")) {
+  const probe = new AbortController();
+  setTimeout(() => probe.abort(), 2000);
+  fetch(new URL("/icon.svg", MDNS_URL), { mode: "no-cors", signal: probe.signal })
+    .then(() => { API_URL = MDNS_URL; $("url-get").textContent = API_URL; })
+    .catch(() => {});
+}
 document.querySelectorAll("[data-copy]").forEach((b) => {
   b.onclick = async () => {
     if (await copyText($(b.dataset.copy).textContent)) toast("Адрес скопирован");
@@ -282,6 +327,21 @@ document.querySelectorAll("[data-shortcut]").forEach((b) => {
     setTimeout(() => { location.href = `/shortcuts/${b.dataset.shortcut}.shortcut`; }, 400);
   };
 });
+// Android-приложение подключается ссылкой phonenect://pair — адрес и токен вводить не нужно.
+$("android-pair").onclick = () => {
+  // Адрес страницы (IP), а не phonenect.local: сетевой клиент приложения .local не разрешает,
+  // а смену IP приложение переживает само через поиск по mDNS.
+  const api = new URL("{{API_URL}}");
+  location.href = `phonenect://pair?url=${encodeURIComponent(api.origin)}&t=${encodeURIComponent(api.searchParams.get("t"))}`;
+};
+// Показываем раздел только своей платформе.
+$("android").hidden = device !== "Android";
+$("setup").hidden = device === "Android";
+if (device === "Android") {
+  try { $("android").open = !localStorage.getItem("pn-android-seen"); } catch {}
+  $("android").addEventListener("toggle", () => { try { localStorage.setItem("pn-android-seen", "1"); } catch {} });
+}
+
 // Первый раз на iPhone раскрываем инструкцию сами.
 if (device === "iPhone" || device === "iPad") {
   try { $("setup").open = !localStorage.getItem("pn-setup-seen"); } catch {}

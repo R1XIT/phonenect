@@ -4,4 +4,5 @@ Pillow>=11
 pystray>=0.19
 qrcode>=8
 pillow-heif>=0.18  # HEIC-фото с iPhone
+zeroconf>=0.130  # имя phonenect.local в сети
 striprtf>=0.0.26  # форматированный текст из «Быстрых команд»

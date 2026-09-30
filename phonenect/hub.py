@@ -58,6 +58,7 @@ class Hub:
         self.history: deque[Clip] = deque(maxlen=HISTORY_SIZE)
         self.sockets: set = set()
         self.paused = False
+        self.delivered: dict[str, int] = {}  # устройство -> id последнего полученного клипа
         self.loop: asyncio.AbstractEventLoop | None = None
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
@@ -117,7 +118,21 @@ class Hub:
 
     # ---------- телефон -> ПК ----------
 
-    async def add_remote(self, body: bytes, content_type: str, source: str) -> Clip | None:
+    def take_new(self, device: str, max_age: float) -> Clip | None:
+        """Последний клип, если это устройство его ещё не получало и он не старше max_age секунд."""
+        clip = self.latest
+        if (
+            clip is None
+            or clip.source == device
+            or self.delivered.get(device, 0) >= clip.id
+            or time.time() - clip.ts > max_age
+        ):
+            return None
+        self.delivered[device] = clip.id
+        return clip
+
+    async def add_remote(self, body: bytes, content_type: str, source: str, auto: bool = False) -> Clip | None:
+        """Кладёт присланное в буфер ПК. None — автоотправка пропущена как уже известная."""
         kind, mime = classify(body, content_type)
         if kind == "text":
             body = plain_text(body, content_type)
@@ -127,9 +142,15 @@ class Hub:
                 buf = io.BytesIO()
                 img.save(buf, "PNG")
             body, mime = buf.getvalue(), "image/png"
-        clip =self._add(kind, body, mime, source)
+        if auto and any(c.kind == kind and c.data == body for c in self.history):
+            # Автоматизация шлёт буфер iPhone при каждом закрытии приложения. Если там то,
+            # что уже было (в том числе забранное с ПК), свежий буфер ПК не трогаем.
+            return None
+        clip = self._add(kind, body, mime, source)
         if not clip:
             return self.latest
+        # Своё устройство не должно забирать этот клип обратно через «только новое».
+        self.delivered[source] = max(self.delivered.get(source, 0), clip.id)
         if not self.paused:
             await asyncio.get_running_loop().run_in_executor(None, self._write_pc, clip)
         await self.broadcast(clip)

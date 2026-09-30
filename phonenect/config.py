@@ -1,13 +1,16 @@
 """Конфиг агента: порт и токен доступа, хранятся в %APPDATA%\\phonenect."""
 import json
 import os
+import re
 import secrets
 import socket
+import subprocess
 from pathlib import Path
 
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "phonenect"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_PORT = 8765
+MDNS_HOST = "phonenect.local"
 
 
 def load() -> dict:
@@ -32,6 +35,25 @@ def load() -> dict:
 def save(cfg: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2), "utf-8")
+
+
+def wifi_ssid() -> str | None:
+    """Имя Wi-Fi сети ПК — подсказка для команд iPhone, которые работают только дома."""
+    try:
+        out = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW,
+        ).stdout
+    except Exception:
+        return None
+    for enc in ("utf-8", "oem"):
+        try:
+            text = out.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    match = re.search(r"^\s*SSID\s*:\s*(.+?)\s*$", text, re.MULTILINE)
+    return match.group(1) if match else None
 
 
 def lan_ip(cfg: dict | None = None) -> str:
