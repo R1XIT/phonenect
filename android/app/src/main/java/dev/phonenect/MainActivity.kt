@@ -25,6 +25,7 @@ import java.lang.ref.WeakReference
 /** Настройка: подключение к ПК и разрешения, без которых автоматика не работает. */
 class MainActivity : Activity() {
     companion object {
+        private const val PICK_FILES = 2
         private var current = WeakReference<MainActivity>(null)
 
         /** Служба сообщает о смене статуса — перерисовываем экран, если он открыт. */
@@ -156,6 +157,18 @@ class MainActivity : Activity() {
         text("Пока настройка не закончена, буфер уходит на ПК, когда вы открываете это приложение.", 13f, muted = true)
             .setPadding(0, dp(8), 0, 0)
 
+        section("Файлы")
+        text("Файлы с ПК сами скачиваются в «Загрузки/Phonenect»: скопируйте файл в проводнике (Ctrl+C) " +
+            "или выберите в трее «Отправить файлы на телефон». С телефона на ПК — «Поделиться» → «На ПК» в любом приложении " +
+            "или кнопка ниже. Файл окажется в папке «Загрузки\\Phonenect» на ПК и в его буфере (Ctrl+V).", 14f, muted = true)
+        button("Отправить файлы на ПК") {
+            startActivityForResult(
+                Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                    .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true),
+                PICK_FILES,
+            )
+        }
+
         section("Ещё")
         button("Сменить ПК") {
             SyncService.stop(this)
@@ -163,6 +176,17 @@ class MainActivity : Activity() {
             prefs.token = null
             render()
         }
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION") // Activity без AndroidX: другого способа получить выбор нет
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != PICK_FILES || resultCode != RESULT_OK || data == null) return
+        val clip = data.clipData
+        val uris = if (clip != null) (0 until clip.itemCount).map { clip.getItemAt(it).uri } else listOfNotNull(data.data)
+        if (uris.isEmpty()) return
+        SyncService.sendFiles(this, uris)
+        Toast.makeText(this, "Отправляю на ПК…", Toast.LENGTH_SHORT).show()
     }
 
     private fun section(title: String) {

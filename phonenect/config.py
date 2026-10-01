@@ -37,6 +37,22 @@ def save(cfg: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2), "utf-8")
 
 
+def files_dir(cfg: dict) -> Path:
+    """Куда складываются файлы с телефонов. Можно задать полем "files_dir" в config.json."""
+    if cfg.get("files_dir"):
+        path = Path(cfg["files_dir"])
+    else:
+        try:
+            from win32com.shell import shell
+
+            downloads = Path(shell.SHGetKnownFolderPath(shell.FOLDERID_Downloads))
+        except Exception:
+            downloads = Path.home() / "Downloads"
+        path = downloads / "Phonenect"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def wifi_ssid() -> str | None:
     """Имя Wi-Fi сети ПК — подсказка для команд iPhone, которые работают только дома."""
     try:

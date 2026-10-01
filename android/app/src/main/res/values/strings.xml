@@ -5,4 +5,13 @@
     <string name="status_connecting">Подключение к ПК…</string>
     <string name="status_connected">Общий буфер с ПК (%1$s)</string>
     <string name="status_offline">Нет связи с ПК — переподключаюсь</string>
+    <string name="share_label">На ПК</string>
+    <string name="files_channel_name">Файлы</string>
+    <string name="download_description">Файл с ПК</string>
+    <string name="file_offer_title">Файл с ПК: %1$s</string>
+    <string name="file_offer_text">%1$s — нажмите, чтобы скачать</string>
+    <string name="upload_progress">Отправка на ПК</string>
+    <string name="upload_done">Отправлено на ПК</string>
+    <string name="upload_failed">Не удалось отправить на ПК</string>
+    <string name="upload_count">Файлов: %1$d</string>
 </resources>

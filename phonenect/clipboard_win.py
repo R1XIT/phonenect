@@ -1,5 +1,7 @@
-"""Чтение и запись буфера обмена Windows (текст и картинки)."""
+"""Чтение и запись буфера обмена Windows (текст, картинки и файлы)."""
 import io
+import os
+import struct
 import time
 
 import win32clipboard
@@ -7,6 +9,8 @@ import win32con
 from PIL import Image, ImageGrab
 
 CF_PNG = win32clipboard.RegisterClipboardFormat("PNG")
+CF_DROP_EFFECT = win32clipboard.RegisterClipboardFormat("Preferred DropEffect")
+DROPEFFECT_COPY = 1
 
 
 def sequence_number() -> int:
@@ -25,7 +29,7 @@ def _open(retries: int = 10) -> None:
 
 
 def read():
-    """Возвращает ("text", str), ("image", png_bytes) или None."""
+    """Возвращает ("text", str), ("image", png_bytes), ("files", [пути]) или None."""
     try:
         img = ImageGrab.grabclipboard()
     except Exception:
@@ -35,15 +39,9 @@ def read():
         img.save(buf, "PNG")
         return "image", buf.getvalue()
     if isinstance(img, list):
-        # Скопированы файлы в проводнике — берём первую картинку, если есть.
-        for path in img:
-            try:
-                with Image.open(path) as f:
-                    buf = io.BytesIO()
-                    f.save(buf, "PNG")
-                    return "image", buf.getvalue()
-            except Exception:
-                continue
+        # Скопированы файлы в проводнике. Папки пропускаем.
+        files = [p for p in img if os.path.isfile(p)]
+        return ("files", files) if files else None
 
     _open()
     try:
@@ -82,6 +80,21 @@ def write_image(png: bytes) -> int:
         win32clipboard.EmptyClipboard()
         win32clipboard.SetClipboardData(win32con.CF_DIB, dib)
         win32clipboard.SetClipboardData(CF_PNG, png_buf.getvalue())
+    finally:
+        win32clipboard.CloseClipboard()
+    return sequence_number()
+
+
+def write_files(paths: list[str]) -> int:
+    """Кладёт файлы в буфер так же, как «Копировать» в проводнике: Ctrl+V вставит сами файлы."""
+    # DROPFILES: смещение списка, точка, fNC, fWide; дальше пути в UTF-16, каждый с нулём на конце, и ещё один ноль.
+    names = "".join(p + chr(0) for p in paths) + chr(0)
+    hdrop = struct.pack("<IiiII", 20, 0, 0, 0, 1) + names.encode("utf-16-le")
+    _open()
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32con.CF_HDROP, hdrop)
+        win32clipboard.SetClipboardData(CF_DROP_EFFECT, struct.pack("<I", DROPEFFECT_COPY))
     finally:
         win32clipboard.CloseClipboard()
     return sequence_number()

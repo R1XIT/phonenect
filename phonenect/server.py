@@ -3,7 +3,7 @@ import hmac
 import io
 import json
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import qrcode
 import qrcode.image.svg
@@ -24,6 +24,12 @@ SHORTCUT_NAMES = {
     "auto-from-pc": "Авто — С ПК",
 }
 DEFAULT_MAX_AGE = 120  # секунд: более старый буфер ПК автоматизация не подхватит
+
+
+def attachment(name: str) -> str:
+    """Content-Disposition с русским именем: ASCII-запасное плюс filename* в UTF-8."""
+    fallback = name.encode("ascii", "replace").decode().replace("?", "_").replace('"', "_")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name)}"
 
 
 def create_app(hub: Hub, cfg: dict, base_url: str) -> web.Application:
@@ -74,6 +80,18 @@ def create_app(hub: Hub, cfg: dict, base_url: str) -> web.Application:
     def raw(clip):
         if clip is None:
             raise web.HTTPNotFound(text="Буфер пуст")
+        if clip.kind == "file":
+            if not Path(clip.path).is_file():
+                raise web.HTTPNotFound(text="Файла больше нет на ПК")
+            return web.FileResponse(
+                clip.path,
+                headers={
+                    "Content-Type": clip.mime,
+                    "Content-Disposition": attachment(clip.name),
+                    "X-Clip-Id": str(clip.id),
+                    "Cache-Control": "no-store",
+                },
+            )
         return web.Response(
             body=clip.data,
             content_type=clip.mime.split(";")[0],
@@ -101,19 +119,32 @@ def create_app(hub: Hub, cfg: dict, base_url: str) -> web.Application:
         return web.json_response([c.meta() for c in reversed(hub.history)])
 
     async def post_clip(request: web.Request):
+        # Имя файла (в заголовке — в %-кодировке) означает: это файл, а не содержимое буфера.
+        name = unquote(request.headers.get("X-Filename", "")) or request.query.get("name") or None
+        as_file = bool(name)
         if request.content_type.startswith("multipart/"):
             reader = await request.multipart()
             part = await reader.next()
             if part is None:
                 raise web.HTTPBadRequest(text="Пустой запрос")
-            body = await part.read(decode=True)
+            name = name or unquote(part.filename or "")
             ctype = part.headers.get("Content-Type", "")
+
+            async def chunks():
+                while chunk := await part.read_chunk():
+                    yield chunk
         else:
-            body = await request.read()
-            ctype = request.content_type
-        if not body:
-            raise web.HTTPBadRequest(text="Пустой запрос")
-        clip = await hub.add_remote(body, ctype, source_name(request), auto=flag(request, "X-Auto", "auto"))
+            ctype = request.headers.get("Content-Type", "")
+
+            async def chunks():
+                async for chunk in request.content.iter_any():
+                    yield chunk
+        try:
+            clip = await hub.receive(
+                chunks(), ctype, source_name(request), name=name, as_file=as_file, auto=flag(request, "X-Auto", "auto")
+            )
+        except ValueError as e:
+            raise web.HTTPBadRequest(text=str(e))
         if clip is None:
             return web.json_response({"skipped": True})
         return web.json_response(clip.meta())

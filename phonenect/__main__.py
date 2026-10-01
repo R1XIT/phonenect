@@ -69,6 +69,26 @@ def tray_icon() -> Image.Image:
     return img
 
 
+def pick_files() -> list[str]:
+    """Стандартное окно выбора нескольких файлов."""
+    import win32con
+    import win32gui
+
+    try:
+        result = win32gui.GetOpenFileNameW(
+            Title="Отправить на телефон",
+            Flags=win32con.OFN_ALLOWMULTISELECT | win32con.OFN_EXPLORER | win32con.OFN_FILEMUSTEXIST,
+            MaxFile=65536,
+        )[0]
+    except win32gui.error:  # нажали «Отмена»
+        return []
+    # Один файл — полный путь; несколько — папка и имена через нулевой символ.
+    parts = result.split(chr(0))
+    if len(parts) == 1:
+        return parts
+    return [os.path.join(parts[0], name) for name in parts[1:] if name]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="phonenect")
     parser.add_argument("--no-tray", action="store_true", help="без иконки в трее (консольный режим)")
@@ -87,7 +107,8 @@ def main() -> None:
             sys.exit(1)
         return
 
-    hub = Hub()
+    files_dir = config.files_dir(cfg)
+    hub = Hub(files_dir)
     ready = threading.Event()
     threading.Thread(target=run_server, args=(hub, cfg, base_url, ready), daemon=True).start()
     ready.wait()
@@ -109,6 +130,15 @@ def main() -> None:
         return
 
     import pystray
+
+    def send_files(icon, item):
+        def work():
+            paths = pick_files()
+            if paths:
+                hub.send_files(paths)
+                icon.notify(f"Отправлено на телефоны: {len(paths)} шт.", "Phonenect")
+
+        threading.Thread(target=work, daemon=True).start()
 
     def toggle_pause(icon, item):
         hub.paused = not hub.paused
@@ -137,6 +167,9 @@ def main() -> None:
         "Phonenect — общий буфер",
         menu=pystray.Menu(
             pystray.MenuItem("Подключить телефон…", lambda: webbrowser.open(local_pair), default=True),
+            pystray.MenuItem("Отправить файлы на телефон…", send_files),
+            pystray.MenuItem("Открыть полученные файлы", lambda: os.startfile(files_dir)),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Настроить Android по USB", setup_android),
             pystray.MenuItem("Пауза синхронизации", toggle_pause, checked=lambda item: hub.paused),
             pystray.MenuItem("Запускать вместе с Windows", toggle_autostart, checked=lambda item: autostart_enabled()),
@@ -144,6 +177,9 @@ def main() -> None:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Выход", quit_app),
         ),
+    )
+    hub.on_file = lambda clip: icon.notify(
+        f"{clip.name} — в папке «{files_dir.name}» и в буфере (Ctrl+V)", f"Файл от {clip.source}"
     )
     icon.run()
 

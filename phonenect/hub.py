@@ -3,11 +3,17 @@ import asyncio
 import hashlib
 import io
 import itertools
+import mimetypes
+import os
+import re
 import threading
 import time
+import uuid
 from collections import deque
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
+from pathlib import Path
 
 from PIL import Image
 from striprtf.striprtf import rtf_to_text
@@ -24,20 +30,32 @@ except ImportError:
 HISTORY_SIZE = 30
 POLL_INTERVAL = 0.4
 WEB_IMAGE_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".heif", ".tif", ".tiff"}
+MAX_CLIP = 50 * 1024 * 1024  # больше этого в буфер не кладём — только файлом
+MAX_FILES = 20  # сколько файлов за раз уходит на телефоны при копировании в проводнике
+# Тип, по которому не понять, текст это, картинка или файл, — тогда смотрим на содержимое.
+VAGUE_TYPES = {"", "application/octet-stream", "application/x-www-form-urlencoded"}
 
 
 @dataclass
 class Clip:
     id: int
-    kind: str  # "text" | "image"
-    data: bytes  # utf-8 для текста, байты файла для картинки
+    kind: str  # "text" | "image" | "file"
+    data: bytes  # utf-8 для текста, байты картинки; у файла пусто — он лежит на диске
     mime: str
     source: str
     ts: float = field(default_factory=time.time)
+    path: str | None = None  # для файла
+    file_size: int = 0
+    sha: str | None = None  # для файла, если считали при приёме
+
+    @property
+    def name(self) -> str | None:
+        return os.path.basename(self.path) if self.path else None
 
     @property
     def digest(self) -> str:
-        return hashlib.sha1(self.data).hexdigest()
+        return self.sha or hashlib.sha1(self.data).hexdigest()
 
     def meta(self) -> dict:
         m = {
@@ -46,18 +64,22 @@ class Clip:
             "mime": self.mime,
             "source": self.source,
             "ts": self.ts,
-            "size": len(self.data),
+            "size": self.file_size if self.kind == "file" else len(self.data),
         }
         if self.kind == "text":
             m["text"] = self.data.decode("utf-8", "replace")
+        elif self.kind == "file":
+            m["name"] = self.name
         return m
 
 
 class Hub:
-    def __init__(self) -> None:
+    def __init__(self, files_dir: Path) -> None:
         self.history: deque[Clip] = deque(maxlen=HISTORY_SIZE)
         self.sockets: set = set()
         self.paused = False
+        self.files_dir = files_dir
+        self.on_file: Callable[[Clip], None] | None = None  # пришёл файл с телефона — для уведомления
         self.delivered: dict[str, int] = {}  # устройство -> id последнего полученного клипа
         self.loop: asyncio.AbstractEventLoop | None = None
         self._ids = itertools.count(1)
@@ -74,11 +96,11 @@ class Hub:
     def get(self, clip_id: int) -> Clip | None:
         return next((c for c in self.history if c.id == clip_id), None)
 
-    def _add(self, kind: str, data: bytes, mime: str, source: str) -> Clip | None:
+    def _add(self, kind: str, data: bytes, mime: str, source: str, **file) -> Clip | None:
         latest = self.latest
-        if latest and latest.kind == kind and latest.data == data:
+        if latest and latest.kind == kind and latest.data == data and latest.path == file.get("path"):
             return None
-        clip = Clip(next(self._ids), kind, data, mime, source)
+        clip = Clip(next(self._ids), kind, data, mime, source, **file)
         self.history.append(clip)
         return clip
 
@@ -86,6 +108,7 @@ class Hub:
 
     def watch_clipboard(self) -> None:
         """Поток: следит за буфером Windows через номер последовательности."""
+        mimetypes.init()  # в Windows читает реестр секунду-другую — делаем это здесь, а не в цикле событий
         while not self._stop.wait(POLL_INTERVAL):
             with self._lock:
                 seq = cb.sequence_number()
@@ -102,6 +125,13 @@ class Hub:
             if not content:
                 continue
             kind, value = content
+            if kind == "files":
+                # Одна скопированная картинка, как раньше, уходит в буфер телефона, остальное — файлами.
+                image = single_image(value)
+                if image is None:
+                    self.send_files(value)
+                    continue
+                kind, value = "image", image
             if kind == "text":
                 clip_args = ("text", value.encode("utf-8"), "text/plain; charset=utf-8")
             else:
@@ -113,6 +143,21 @@ class Hub:
         if clip:
             asyncio.ensure_future(self.broadcast(clip))
 
+    def send_files(self, paths: list[str]) -> None:
+        """Отправить файлы ПК на телефоны. Можно звать из любого потока."""
+        self.loop.call_soon_threadsafe(self._publish_files, paths)
+
+    def _publish_files(self, paths: list[str]) -> None:
+        for path in paths[:MAX_FILES]:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            clip = self._add("file", b"", mime, "ПК", path=path, file_size=size)
+            if clip:
+                asyncio.ensure_future(self.broadcast(clip))
+
     def stop(self) -> None:
         self._stop.set()
 
@@ -123,12 +168,59 @@ class Hub:
         clip = self.latest
         if (
             clip is None
+            # Файлы автоматизациям не отдаём: незачем качать гигабайт при каждом открытии приложения.
+            or clip.kind == "file"
             or clip.source == device
             or self.delivered.get(device, 0) >= clip.id
             or time.time() - clip.ts > max_age
         ):
             return None
         self.delivered[device] = clip.id
+        return clip
+
+    async def receive(
+        self,
+        chunks: AsyncIterator[bytes],
+        content_type: str,
+        source: str,
+        name: str | None = None,
+        as_file: bool = False,
+        auto: bool = False,
+    ) -> Clip | None:
+        """Принимает присланное потоком: текст и картинки — в буфер, остальное — файлом в папку.
+        None — автоотправка пропущена как уже известная."""
+        ct = (content_type or "").split(";")[0].strip().lower()
+        tmp = self.files_dir / f".{uuid.uuid4().hex}.part"
+        sha = hashlib.sha1()
+        size = 0
+        try:
+            # Тело может быть большим — пишем на диск по кускам, а не держим в памяти.
+            with open(tmp, "wb") as f:
+                async for chunk in chunks:
+                    f.write(chunk)
+                    sha.update(chunk)
+                    size += len(chunk)
+            if not size:
+                raise ValueError("Пустой запрос")
+            if not as_file and size <= MAX_CLIP and (ct.startswith(("text/", "image/")) or ct in VAGUE_TYPES):
+                body = tmp.read_bytes()
+                if ct.startswith(("text/", "image/")) or looks_like_clip(body):
+                    return await self.add_remote(body, content_type, source, auto)
+            digest = sha.hexdigest()
+            if auto and any(c.digest == digest for c in self.history):
+                return None
+            path = unique_path(self.files_dir / (safe_name(name) or default_name(source, ct)))
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        mime = ct if ct not in VAGUE_TYPES else mimetypes.guess_type(path)[0] or "application/octet-stream"
+        clip = self._add("file", b"", mime, source, path=str(path), file_size=size, sha=digest)
+        self.delivered[source] = max(self.delivered.get(source, 0), clip.id)
+        if not self.paused:
+            await asyncio.get_running_loop().run_in_executor(None, self._write_pc, clip)
+        if self.on_file:
+            self.on_file(clip)
+        await self.broadcast(clip)
         return clip
 
     async def add_remote(self, body: bytes, content_type: str, source: str, auto: bool = False) -> Clip | None:
@@ -160,6 +252,8 @@ class Hub:
         with self._lock:
             if clip.kind == "text":
                 self._last_seq = cb.write_text(clip.data.decode("utf-8"))
+            elif clip.kind == "file":
+                self._last_seq = cb.write_files([clip.path])
             else:
                 self._last_seq = cb.write_image(clip.data)
 
@@ -213,3 +307,62 @@ def classify(body: bytes, content_type: str) -> tuple[str, str]:
         return "image", Image.MIME.get(fmt.upper(), f"image/{fmt}")
     except Exception:
         return "text", "text/plain; charset=utf-8"
+
+
+def looks_like_clip(body: bytes) -> bool:
+    """Без внятного Content-Type: картинка или текст идут в буфер, остальное — файлом."""
+    try:
+        with Image.open(io.BytesIO(body)):
+            return True
+    except Exception:
+        pass
+    try:
+        return "\x00" not in body.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+
+
+def single_image(paths: list[str]) -> bytes | None:
+    """PNG, если в проводнике скопирована ровно одна картинка."""
+    if len(paths) != 1 or Path(paths[0]).suffix.lower() not in IMAGE_EXTS:
+        return None
+    try:
+        if os.path.getsize(paths[0]) > MAX_CLIP:
+            return None
+        with Image.open(paths[0]) as img:
+            buf = io.BytesIO()
+            img.save(buf, "PNG")
+            return buf.getvalue()
+    except Exception:
+        return None
+
+
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def safe_name(name: str | None) -> str | None:
+    """Имя файла от телефона без путей и запрещённых в Windows символов."""
+    if not name:
+        return None
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name.replace("\\", "/").rsplit("/", 1)[-1]).strip(" .")
+    stem, ext = os.path.splitext(name)
+    if not stem:
+        return None
+    if stem.upper() in _RESERVED:
+        stem = "_" + stem
+    return stem[:120] + ext[:20]
+
+
+def default_name(source: str, content_type: str) -> str:
+    ext = mimetypes.guess_extension(content_type) if content_type not in VAGUE_TYPES else None
+    return safe_name(f"{source} {time.strftime('%Y-%m-%d %H-%M-%S')}{ext or ''}") or "Файл"
+
+
+def unique_path(path: Path) -> Path:
+    """report.pdf → report (2).pdf, если такой уже есть."""
+    n = 2
+    candidate = path
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem} ({n}){path.suffix}")
+        n += 1
+    return candidate
