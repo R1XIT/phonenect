@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 from . import android_setup, config
 from .hub import Hub
 from .mdns import Advertiser
+from .peers import Peers
 from .server import create_app
 
 
@@ -20,7 +21,8 @@ def run_server(hub: Hub, cfg: dict, base_url: str, ready: threading.Event) -> No
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     hub.loop = loop
-    runner = web.AppRunner(create_app(hub, cfg, base_url))
+    peers = Peers(hub, cfg)
+    runner = web.AppRunner(create_app(hub, cfg, base_url, peers))
     loop.run_until_complete(runner.setup())
     try:
         loop.run_until_complete(web.TCPSite(runner, "0.0.0.0", cfg["port"]).start())
@@ -30,6 +32,7 @@ def run_server(hub: Hub, cfg: dict, base_url: str, ready: threading.Event) -> No
         ready.set()
         return
     ready.set()
+    loop.call_soon(peers.start)
     loop.run_forever()
 
 
@@ -101,14 +104,14 @@ def main() -> None:
 
     if args.setup_android:
         try:
-            print("Готово:", android_setup.setup(base_url, cfg["token"]))
+            print("Готово:", android_setup.setup(base_url, cfg["token"], config.pc_name(cfg)))
         except android_setup.SetupError as e:
             print("Ошибка:", e)
             sys.exit(1)
         return
 
     files_dir = config.files_dir(cfg)
-    hub = Hub(files_dir)
+    hub = Hub(files_dir, config.pc_name(cfg), config.pc_id(cfg["token"]))
     ready = threading.Event()
     threading.Thread(target=run_server, args=(hub, cfg, base_url, ready), daemon=True).start()
     ready.wait()
@@ -135,7 +138,7 @@ def main() -> None:
         def work():
             paths = pick_files()
             if paths:
-                hub.send_files(paths)
+                hub.send_files(paths, explicit=True)
                 icon.notify(f"Отправлено на телефоны: {len(paths)} шт.", "Phonenect")
 
         threading.Thread(target=work, daemon=True).start()
@@ -147,7 +150,7 @@ def main() -> None:
         def work():
             notify = lambda text: icon.notify(text, "Phonenect")
             try:
-                model = android_setup.setup(base_url, cfg["token"], log=notify)
+                model = android_setup.setup(base_url, cfg["token"], config.pc_name(cfg), log=notify)
                 notify(f"{model} настроен: буфер теперь общий автоматически.")
             except android_setup.SetupError as e:
                 notify(str(e))
@@ -167,6 +170,7 @@ def main() -> None:
         "Phonenect — общий буфер",
         menu=pystray.Menu(
             pystray.MenuItem("Подключить телефон…", lambda: webbrowser.open(local_pair), default=True),
+            pystray.MenuItem("Связать с другим ПК…", lambda: webbrowser.open(local_pair + "#pc")),
             pystray.MenuItem("Отправить файлы на телефон…", send_files),
             pystray.MenuItem("Открыть полученные файлы", lambda: os.startfile(files_dir)),
             pystray.Menu.SEPARATOR,

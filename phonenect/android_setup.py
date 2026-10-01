@@ -73,7 +73,7 @@ def pick_device(adb: str) -> str:
     return ready[0]
 
 
-def setup(pair_base: str, token: str, log=print) -> str:
+def setup(pair_base: str, token: str, name: str, log=print) -> str:
     """Возвращает модель телефона. Исключение SetupError — понятное пользователю сообщение."""
     adb = find_adb(log)
     serial = pick_device(adb)
@@ -98,6 +98,6 @@ def setup(pair_base: str, token: str, log=print) -> str:
     sh("am", "force-stop", PACKAGE)
 
     log("Подключаю приложение к ПК…")
-    link = f"phonenect://pair?url={quote(pair_base, safe='')}&t={quote(token, safe='')}"
+    link = f"phonenect://pair?url={quote(pair_base, safe='')}&t={quote(token, safe='')}&name={quote(name, safe='')}"
     sh("am", "start", "-a", "android.intent.action.VIEW", "-d", f"'{link}'", PACKAGE)
     return model

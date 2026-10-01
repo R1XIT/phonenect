@@ -6,18 +6,22 @@ import android.net.nsd.NsdServiceInfo
 import android.os.Handler
 import android.os.Looper
 
-/** Ищет агент Phonenect в сети по mDNS (_phonenect._tcp) — на случай, если у ПК сменился IP. */
+/**
+ * Ищет агент Phonenect в сети по mDNS (_phonenect._tcp) — на случай, если у ПК сменился IP.
+ * ПК в сети может быть несколько: берём только тот, чей id совпал.
+ */
 object Discovery {
     private const val TYPE = "_phonenect._tcp."
     private const val TIMEOUT_MS = 8_000L
 
-    fun find(context: Context, onFound: (host: String, port: Int) -> Unit) {
+    fun find(context: Context, id: String, onFound: (host: String, port: Int) -> Unit) {
         val nsd = context.getSystemService(NsdManager::class.java)
-        Search(nsd, onFound).start()
+        Search(nsd, id, onFound).start()
     }
 
     private class Search(
         private val nsd: NsdManager,
+        private val id: String,
         private val onFound: (String, Int) -> Unit,
     ) : NsdManager.DiscoveryListener {
         private val handler = Handler(Looper.getMainLooper())
@@ -42,6 +46,9 @@ object Discovery {
             @Suppress("DEPRECATION")
             nsd.resolveService(info, object : NsdManager.ResolveListener {
                 override fun onServiceResolved(resolved: NsdServiceInfo) {
+                    // Старые версии Phonenect id не объявляют — тогда, как раньше, берём найденный.
+                    val theirs = resolved.attributes["id"]?.let { String(it) }
+                    if (theirs != null && theirs != id) return
                     @Suppress("DEPRECATION")
                     val host = resolved.host?.hostAddress ?: return
                     handler.post {

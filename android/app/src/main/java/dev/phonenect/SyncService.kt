@@ -110,6 +110,12 @@ class SyncService : Service() {
     var connected = false
         private set
 
+    /** ПК этой службы. Запоминаем при запуске: после переключения запросы старой службы не уйдут на новый ПК. */
+    @Volatile
+    private var pc: Pc? = null
+    private val baseUrl: String? get() = pc?.url
+    private val token: String? get() = pc?.token
+
     // Защита от эха: то, что мы сами положили в буфер, обратно не отправляем.
     @Volatile
     private var ownDigest: String? = null
@@ -145,6 +151,7 @@ class SyncService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (pc == null) pc = prefs.active
         if (socket == null) connect()
         if (intent == null) return START_STICKY
         when (intent.action) {
@@ -164,7 +171,9 @@ class SyncService : Service() {
             ACTION_DOWNLOAD -> {
                 val id = intent.getIntExtra("id", 0)
                 getSystemService(NotificationManager::class.java).cancel(1000 + id)
-                download(id, intent.getStringExtra("name").orEmpty(), intent.getStringExtra("mime"))
+                // Качаем с того ПК, откуда пришло уведомление, даже если активный уже другой.
+                val from = prefs.pcs.items.firstOrNull { it.id == intent.getStringExtra("pc") } ?: return START_STICKY
+                download(id, intent.getStringExtra("name").orEmpty(), intent.getStringExtra("mime"), from)
             }
         }
         return START_STICKY
@@ -202,16 +211,17 @@ class SyncService : Service() {
     // ---------- связь с ПК ----------
 
     private fun connect() {
-        val base = prefs.baseUrl ?: return
+        val base = baseUrl ?: return
         val request = Request.Builder()
             .url(base.replaceFirst("http", "ws") + "/ws")
-            .header("Authorization", "Bearer ${prefs.token}")
+            .header("Authorization", "Bearer $token")
             .build()
         socket = http.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 failures = 0
                 connected = true
-                updateStatus(getString(R.string.status_connected, base.removePrefix("http://")))
+                updateStatus(getString(R.string.status_connected, pc?.name ?: base.removePrefix("http://")))
+                io.execute(::fetchName)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -235,6 +245,21 @@ class SyncService : Service() {
         })
     }
 
+    /** ПК, добавленный вставкой адреса, известен только по IP — узнаём его имя. */
+    private fun fetchName() {
+        try {
+            val pc = pc ?: return
+            val name = get("/api/info")?.let { JSONObject(String(it)).optString("name") } ?: return
+            if (name.isNotEmpty() && name != pc.name) {
+                prefs.rename(pc.id, name)
+                this.pc = pc.copy(name = name)
+                updateStatus(getString(R.string.status_connected, name))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "info failed", e) // старая версия Phonenect на ПК — остаёмся с IP
+        }
+    }
+
     private fun reconnect() {
         connected = false
         socket = null
@@ -242,7 +267,14 @@ class SyncService : Service() {
         failures++
         updateStatus(getString(R.string.status_offline))
         // После нескольких неудач ищем ПК в сети заново: он мог получить другой IP.
-        if (failures % 3 == 0) Discovery.find(this) { host, port -> prefs.replaceHost(host, port) }
+        if (failures % 3 == 0) {
+            pc?.let { pc ->
+                Discovery.find(this, pc.id) { host, port ->
+                    prefs.replaceHost(pc.id, host, port)
+                    this.pc = pc.copy(url = "http://$host:$port")
+                }
+            }
+        }
         val delay = minOf(30_000L, 2_000L * failures)
         main.postDelayed({ if (!stopped && socket == null) connect() }, delay)
     }
@@ -277,11 +309,12 @@ class SyncService : Service() {
     // ---------- файлы ----------
 
     /** Качает файл с ПК в «Загрузки/Phonenect»; прогресс и «Открыть» показывает сам Android. */
-    private fun download(id: Int, name: String, mime: String?) {
-        val base = prefs.baseUrl ?: return
+    private fun download(id: Int, name: String, mime: String?, source: Pc? = pc) {
+        val from = source ?: return
+        val base = from.url
         val safe = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "Файл" }
         val request = DownloadManager.Request(Uri.parse("$base/api/clip/$id"))
-            .addRequestHeader("Authorization", "Bearer ${prefs.token}")
+            .addRequestHeader("Authorization", "Bearer ${from.token}")
             .setTitle(safe)
             .setDescription(getString(R.string.download_description))
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
@@ -301,7 +334,7 @@ class SyncService : Service() {
 
     private fun offerDownload(id: Int, name: String, mime: String, size: Long) {
         val intent = Intent(this, SyncService::class.java).setAction(ACTION_DOWNLOAD)
-            .putExtra("id", id).putExtra("name", name).putExtra("mime", mime)
+            .putExtra("id", id).putExtra("name", name).putExtra("mime", mime).putExtra("pc", pc?.id)
         val tap = PendingIntent.getForegroundService(
             this, id, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
@@ -347,8 +380,8 @@ class SyncService : Service() {
                 input.source().use { sink.writeAll(it) }
             }
         }
-        val request = Request.Builder().url(prefs.baseUrl + "/api/clip")
-            .header("Authorization", "Bearer ${prefs.token}")
+        val request = Request.Builder().url(baseUrl + "/api/clip")
+            .header("Authorization", "Bearer $token")
             .header("X-Device", deviceName)
             .header("X-Filename", URLEncoder.encode(name, "UTF-8").replace("+", "%20"))
             .post(body)
@@ -410,14 +443,14 @@ class SyncService : Service() {
     }
 
     private fun get(path: String): ByteArray? {
-        val request = Request.Builder().url(prefs.baseUrl + path)
-            .header("Authorization", "Bearer ${prefs.token}").build()
+        val request = Request.Builder().url(baseUrl + path)
+            .header("Authorization", "Bearer $token").build()
         http.newCall(request).execute().use { r -> return if (r.isSuccessful) r.body.bytes() else null }
     }
 
     private fun post(body: ByteArray, type: String, auto: Boolean = true) {
-        val request = Request.Builder().url(prefs.baseUrl + "/api/clip")
-            .header("Authorization", "Bearer ${prefs.token}")
+        val request = Request.Builder().url(baseUrl + "/api/clip")
+            .header("Authorization", "Bearer $token")
             .header("X-Device", deviceName)
             .apply { if (auto) header("X-Auto", "1") }
             .post(body.toRequestBody(type.toMediaType()))

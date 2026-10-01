@@ -367,10 +367,11 @@ if (secure && navigator.clipboard.read) {
 // ---------- быстрые команды ----------
 let API_URL = "{{API_URL}}";
 const MDNS_URL = "{{MDNS_URL}}";
+const PC_NAME = "{{NAME}}";
 $("url-get").textContent = API_URL;
 $("wifi-name").textContent = "{{WIFI}}" || "имя вашей сети";
-// Если iPhone видит ПК по имени phonenect.local — даём командам его: смена IP их не сломает.
-if (!location.host.startsWith("phonenect.local")) {
+// Если iPhone видит ПК по его mDNS-имени (phonenect-<id>.local) — даём командам его: смена IP их не сломает.
+if (!/^phonenect(-[0-9a-f]+)?\.local/.test(location.host)) {
   const probe = new AbortController();
   setTimeout(() => probe.abort(), 2000);
   fetch(new URL("/icon.svg", MDNS_URL), { mode: "no-cors", signal: probe.signal })
@@ -395,7 +396,8 @@ $("android-pair").onclick = () => {
   // Адрес страницы (IP), а не phonenect.local: сетевой клиент приложения .local не разрешает,
   // а смену IP приложение переживает само через поиск по mDNS.
   const api = new URL("{{API_URL}}");
-  location.href = `phonenect://pair?url=${encodeURIComponent(api.origin)}&t=${encodeURIComponent(api.searchParams.get("t"))}`;
+  location.href = `phonenect://pair?url=${encodeURIComponent(api.origin)}&t=${encodeURIComponent(api.searchParams.get("t"))}` +
+    `&name=${encodeURIComponent(PC_NAME)}`;
 };
 // Показываем раздел только своей платформе.
 $("android").hidden = device !== "Android";

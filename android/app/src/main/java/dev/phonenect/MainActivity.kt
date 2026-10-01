@@ -1,6 +1,7 @@
 package dev.phonenect
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -76,11 +77,15 @@ class MainActivity : Activity() {
 
     private fun handleLink(intent: Intent?) {
         val link = intent?.data?.toString() ?: return
-        if (prefs.applyLink(link)) {
-            SyncService.stop(this)
-            SyncService.start(this)
-            Toast.makeText(this, "Подключено к ${prefs.baseUrl}", Toast.LENGTH_SHORT).show()
-        }
+        val pc = prefs.applyLink(link) ?: return
+        restartSync()
+        Toast.makeText(this, "Подключено к ${pc.name}", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Служба держит связь с одним, активным ПК — после смены ПК запускаем её заново. */
+    private fun restartSync() {
+        SyncService.stop(this)
+        if (prefs.configured) SyncService.start(this)
     }
 
     // ---------- экран ----------
@@ -89,33 +94,26 @@ class MainActivity : Activity() {
         root.removeAllViews()
         text("Phonenect", 26f, bold = true)
         val service = SyncService.instance
+        val pcs = prefs.pcs
+        val active = pcs.active
         val status = when {
-            !prefs.configured -> "Не подключено к ПК"
-            service?.connected == true -> "● Связь с ПК: ${prefs.baseUrl?.removePrefix("http://")}"
-            else -> "○ Нет связи с ПК (${prefs.baseUrl?.removePrefix("http://")}). Проверьте, что ПК в той же сети Wi-Fi."
+            active == null -> "Не подключено к ПК"
+            service?.connected == true -> "● Общий буфер с «${active.name}»"
+            else -> "○ Нет связи с «${active.name}» (${active.url.removePrefix("http://")}). Проверьте, что ПК в той же сети Wi-Fi."
         }
         text(status, 15f).setPadding(0, dp(6), 0, dp(18))
 
-        if (!prefs.configured) {
+        if (active == null) {
             section("Подключение")
-            text("На ПК: значок Phonenect в трее → «Подключить телефон». Отсканируйте QR-код и на открывшейся " +
-                "странице нажмите «Подключить приложение».")
-            text("Или вставьте адрес Phonenect со страницы (раздел «Адрес Phonenect»):").setPadding(0, dp(12), 0, dp(4))
-            val input = EditText(this).apply {
-                hint = "http://192.168.0.10:8765/api/clip?t=…"
-                inputType = InputType.TYPE_TEXT_VARIATION_URI
-                setSingleLine()
-            }
-            root.addView(input)
-            button("Подключить") {
-                if (prefs.applyLink(input.text.toString())) {
-                    SyncService.start(this)
-                    render()
-                } else {
-                    Toast.makeText(this, "Не похоже на адрес Phonenect", Toast.LENGTH_SHORT).show()
-                }
-            }
+            addPcForm()
             return
+        }
+
+        section("Компьютеры")
+        for (pc in pcs.items) pcRow(pc, pc.id == active.id)
+        if (adding) addPcForm() else button("Добавить компьютер") {
+            adding = true
+            render()
         }
 
         section("С ПК на телефон")
@@ -169,13 +167,66 @@ class MainActivity : Activity() {
             )
         }
 
-        section("Ещё")
-        button("Сменить ПК") {
-            SyncService.stop(this)
-            prefs.baseUrl = null
-            prefs.token = null
-            render()
+    }
+
+    private var adding = false
+
+    private fun addPcForm() {
+        text("На ПК: значок Phonenect в трее → «Подключить телефон». Отсканируйте QR-код и на открывшейся " +
+            "странице нажмите «Подключить приложение». Новый ПК добавится к списку.")
+        text("Или вставьте адрес Phonenect со страницы (раздел «Адрес Phonenect»):").setPadding(0, dp(12), 0, dp(4))
+        val input = EditText(this).apply {
+            hint = "http://192.168.0.10:8765/api/clip?t=…"
+            inputType = InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine()
         }
+        root.addView(input)
+        button("Подключить") {
+            if (prefs.applyLink(input.text.toString()) != null) {
+                adding = false
+                restartSync()
+                render()
+            } else {
+                Toast.makeText(this, "Не похоже на адрес Phonenect", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    /** Строка списка ПК: касание делает ПК активным, «Удалить» забывает его. */
+    private fun pcRow(pc: Pc, isActive: Boolean) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, dp(6))
+            if (!isActive) setOnClickListener {
+                prefs.activate(pc.id)
+                restartSync()
+                Toast.makeText(this@MainActivity, "Теперь общий буфер с «${pc.name}»", Toast.LENGTH_SHORT).show()
+                render()
+            }
+        }
+        val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        texts.addView(label((if (isActive) "● " else "○ ") + pc.name, 16f, bold = isActive))
+        texts.addView(label(
+            pc.url.removePrefix("http://") + if (isActive) " · активный" else " · коснитесь, чтобы переключиться",
+            14f, muted = true,
+        ))
+        row.addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(Button(this).apply {
+            text = "Удалить"
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setMessage("Забыть «${pc.name}»? Чтобы подключиться снова, понадобится QR-код с этого ПК.")
+                    .setPositiveButton("Удалить") { _, _ ->
+                        prefs.remove(pc.id)
+                        if (isActive) restartSync()
+                        render()
+                    }
+                    .setNegativeButton("Отмена", null)
+                    .show()
+            }
+        })
+        root.addView(row)
     }
 
     @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION") // Activity без AndroidX: другого способа получить выбор нет

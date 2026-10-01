@@ -1,0 +1,69 @@
+package dev.phonenect
+
+import java.net.URI
+import java.net.URLDecoder
+import java.security.MessageDigest
+
+/** Компьютер с Phonenect. id — как config.pc_id на ПК: по нему ПК находится в сети после смены IP. */
+data class Pc(val id: String, val name: String, val url: String, val token: String)
+
+/** Список ПК, с которыми связан телефон; буфер общий с одним, активным. Без Android — чтобы проверять тестами. */
+data class PcList(val items: List<Pc> = emptyList(), val activeId: String? = null) {
+    val active: Pc? get() = items.firstOrNull { it.id == activeId }
+
+    /** Новый ПК становится активным; уже известный (тот же токен) обновляет адрес и имя. */
+    fun add(pc: Pc): PcList {
+        val known = items.firstOrNull { it.id == pc.id }
+            ?: return PcList(items + pc, pc.id)
+        // В адресе API имени нет — вместо него хост; известное имя не затираем.
+        val name = if (pc.name == hostOf(pc.url)) known.name else pc.name
+        return PcList(items.map { if (it.id == pc.id) pc.copy(name = name) else it }, pc.id)
+    }
+
+    fun activate(id: String) = if (items.any { it.id == id }) copy(activeId = id) else this
+
+    fun remove(id: String): PcList {
+        val rest = items.filter { it.id != id }
+        return PcList(rest, if (activeId == id) rest.firstOrNull()?.id else activeId)
+    }
+
+    fun moved(id: String, host: String, port: Int) = update(id) { it.copy(url = "http://$host:$port") }
+
+    fun renamed(id: String, name: String) = update(id) { it.copy(name = name) }
+
+    private fun update(id: String, change: (Pc) -> Pc) = copy(items = items.map { if (it.id == id) change(it) else it })
+
+    companion object {
+        fun idFor(token: String): String =
+            MessageDigest.getInstance("SHA-256").digest(token.toByteArray()).joinToString("") { "%02x".format(it) }.take(12)
+
+        /**
+         * phonenect://pair?url=http://host:port&t=TOKEN&name=… (кнопка в веб-клиенте)
+         * или адрес API со страницы: http://host:port/api/clip?t=TOKEN.
+         */
+        fun parseLink(link: String): Pc? {
+            val uri = try {
+                URI(link.trim())
+            } catch (e: Exception) {
+                return null
+            }
+            val query = (uri.rawQuery ?: "").split("&").mapNotNull {
+                val (k, v) = it.split("=", limit = 2).takeIf { p -> p.size == 2 } ?: return@mapNotNull null
+                k to URLDecoder.decode(v, "UTF-8")
+            }.toMap()
+            val token = query["t"]?.takeIf { it.isNotEmpty() } ?: return null
+            val base = when (uri.scheme) {
+                "phonenect" -> query["url"]
+                "http", "https" -> if (uri.rawAuthority != null) "${uri.scheme}://${uri.rawAuthority}" else null
+                else -> null
+            }?.trimEnd('/') ?: return null
+            return Pc(idFor(token), query["name"]?.takeIf { it.isNotBlank() } ?: hostOf(base), base, token)
+        }
+
+        fun hostOf(url: String): String = try {
+            URI(url).host
+        } catch (e: Exception) {
+            null
+        } ?: url
+    }
+}

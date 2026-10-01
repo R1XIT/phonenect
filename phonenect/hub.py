@@ -48,6 +48,8 @@ class Clip:
     path: str | None = None  # для файла
     file_size: int = 0
     sha: str | None = None  # для файла, если считали при приёме
+    explicit: bool = False  # файл отправили нарочно (не просто скопировали) — качать при любом размере
+    origin: str = ""  # id ПК, где клип появился (его буфер или его телефоны) — связанные ПК обмениваются только своими
 
     @property
     def name(self) -> str | None:
@@ -70,16 +72,21 @@ class Clip:
             m["text"] = self.data.decode("utf-8", "replace")
         elif self.kind == "file":
             m["name"] = self.name
+            m["explicit"] = self.explicit
+        m["origin"] = self.origin
         return m
 
 
 class Hub:
-    def __init__(self, files_dir: Path) -> None:
+    def __init__(self, files_dir: Path, name: str, pc_id: str) -> None:
+        self.name = name  # имя этого ПК — для подписи клипов
+        self.id = pc_id  # постоянный id этого ПК — для origin
         self.history: deque[Clip] = deque(maxlen=HISTORY_SIZE)
         self.sockets: set = set()
         self.paused = False
         self.files_dir = files_dir
         self.on_file: Callable[[Clip], None] | None = None  # пришёл файл с телефона — для уведомления
+        self.listeners: list[Callable[[Clip], None]] = []  # связанные ПК: каждый новый клип
         self.delivered: dict[str, int] = {}  # устройство -> id последнего полученного клипа
         self.loop: asyncio.AbstractEventLoop | None = None
         self._ids = itertools.count(1)
@@ -96,11 +103,11 @@ class Hub:
     def get(self, clip_id: int) -> Clip | None:
         return next((c for c in self.history if c.id == clip_id), None)
 
-    def _add(self, kind: str, data: bytes, mime: str, source: str, **file) -> Clip | None:
+    def _add(self, kind: str, data: bytes, mime: str, source: str, origin: str | None = None, **file) -> Clip | None:
         latest = self.latest
         if latest and latest.kind == kind and latest.data == data and latest.path == file.get("path"):
             return None
-        clip = Clip(next(self._ids), kind, data, mime, source, **file)
+        clip = Clip(next(self._ids), kind, data, mime, source, origin=origin or self.id, **file)
         self.history.append(clip)
         return clip
 
@@ -143,18 +150,18 @@ class Hub:
         if clip:
             asyncio.ensure_future(self.broadcast(clip))
 
-    def send_files(self, paths: list[str]) -> None:
+    def send_files(self, paths: list[str], explicit: bool = False) -> None:
         """Отправить файлы ПК на телефоны. Можно звать из любого потока."""
-        self.loop.call_soon_threadsafe(self._publish_files, paths)
+        self.loop.call_soon_threadsafe(self._publish_files, paths, explicit)
 
-    def _publish_files(self, paths: list[str]) -> None:
+    def _publish_files(self, paths: list[str], explicit: bool = False) -> None:
         for path in paths[:MAX_FILES]:
             try:
                 size = os.path.getsize(path)
             except OSError:
                 continue
             mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-            clip = self._add("file", b"", mime, "ПК", path=path, file_size=size)
+            clip = self._add("file", b"", mime, "ПК", path=path, file_size=size, explicit=explicit)
             if clip:
                 asyncio.ensure_future(self.broadcast(clip))
 
@@ -170,7 +177,7 @@ class Hub:
             clip is None
             # Файлы автоматизациям не отдаём: незачем качать гигабайт при каждом открытии приложения.
             or clip.kind == "file"
-            or clip.source == device
+            or (clip.source == device and clip.origin == self.id)  # своё, а не тёзки с другого ПК
             or self.delivered.get(device, 0) >= clip.id
             or time.time() - clip.ts > max_age
         ):
@@ -186,6 +193,7 @@ class Hub:
         name: str | None = None,
         as_file: bool = False,
         auto: bool = False,
+        origin: str | None = None,
     ) -> Clip | None:
         """Принимает присланное потоком: текст и картинки — в буфер, остальное — файлом в папку.
         None — автоотправка пропущена как уже известная."""
@@ -205,7 +213,7 @@ class Hub:
             if not as_file and size <= MAX_CLIP and (ct.startswith(("text/", "image/")) or ct in VAGUE_TYPES):
                 body = tmp.read_bytes()
                 if ct.startswith(("text/", "image/")) or looks_like_clip(body):
-                    return await self.add_remote(body, content_type, source, auto)
+                    return await self.add_remote(body, content_type, source, auto, origin)
             digest = sha.hexdigest()
             if auto and any(c.digest == digest for c in self.history):
                 return None
@@ -214,8 +222,8 @@ class Hub:
         finally:
             tmp.unlink(missing_ok=True)
         mime = ct if ct not in VAGUE_TYPES else mimetypes.guess_type(path)[0] or "application/octet-stream"
-        clip = self._add("file", b"", mime, source, path=str(path), file_size=size, sha=digest)
-        self.delivered[source] = max(self.delivered.get(source, 0), clip.id)
+        clip = self._add("file", b"", mime, source, path=str(path), file_size=size, sha=digest, explicit=as_file, origin=origin)
+        self._mark_delivered(clip)
         if not self.paused:
             await asyncio.get_running_loop().run_in_executor(None, self._write_pc, clip)
         if self.on_file:
@@ -223,11 +231,21 @@ class Hub:
         await self.broadcast(clip)
         return clip
 
-    async def add_remote(self, body: bytes, content_type: str, source: str, auto: bool = False) -> Clip | None:
+    def _mark_delivered(self, clip: Clip) -> None:
+        """Своё устройство не должно забирать этот клип обратно через «только новое».
+        Телефон с другого ПК здесь чужой, даже если зовётся так же («iPhone»)."""
+        if clip.origin == self.id:
+            self.delivered[clip.source] = max(self.delivered.get(clip.source, 0), clip.id)
+
+    async def add_remote(
+        self, body: bytes, content_type: str, source: str, auto: bool = False, origin: str | None = None
+    ) -> Clip | None:
         """Кладёт присланное в буфер ПК. None — автоотправка пропущена как уже известная."""
         kind, mime = classify(body, content_type)
         if kind == "text":
-            body = plain_text(body, content_type)
+            # С другого ПК приходит уже чистый текст — HTML-исходник там мог быть скопирован нарочно.
+            if not origin:
+                body = plain_text(body, content_type)
         elif mime not in WEB_IMAGE_MIMES:
             # HEIC/TIFF/BMP браузеры не покажут — перекодируем в PNG.
             with Image.open(io.BytesIO(body)) as img:
@@ -238,11 +256,10 @@ class Hub:
             # Автоматизация шлёт буфер iPhone при каждом закрытии приложения. Если там то,
             # что уже было (в том числе забранное с ПК), свежий буфер ПК не трогаем.
             return None
-        clip = self._add(kind, body, mime, source)
+        clip = self._add(kind, body, mime, source, origin)
         if not clip:
             return self.latest
-        # Своё устройство не должно забирать этот клип обратно через «только новое».
-        self.delivered[source] = max(self.delivered.get(source, 0), clip.id)
+        self._mark_delivered(clip)
         if not self.paused:
             await asyncio.get_running_loop().run_in_executor(None, self._write_pc, clip)
         await self.broadcast(clip)
@@ -260,6 +277,8 @@ class Hub:
     # ---------- рассылка ----------
 
     async def broadcast(self, clip: Clip) -> None:
+        for listener in self.listeners:
+            listener(clip)
         msg = {"event": "clip", "clip": clip.meta()}
         for ws in list(self.sockets):
             try:

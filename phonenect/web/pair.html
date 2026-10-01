@@ -28,6 +28,17 @@
   ol { padding-left: 20px; margin: 8px 0; }
   li { margin: 6px 0; }
   .muted { color: var(--muted); font-size: 13px; }
+  .link { display: flex; gap: 8px; margin: 6px 0 4px; }
+  .link input { flex: 1; min-width: 0; font: 13px/1.5 Consolas, monospace; padding: 8px 10px; border-radius: 8px;
+                border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .peers { list-style: none; padding: 0; margin: 14px 0 0; }
+  .peers li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+  .peers .name { font-weight: 600; }
+  .peers .grow { flex: 1; min-width: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #dc2626; flex: none; }
+  .dot.on { background: #16a34a; }
+  .error { color: #dc2626; font-size: 13px; min-height: 1.5em; margin: 0; }
 </style>
 </head>
 <body>
@@ -46,6 +57,21 @@
       </ol>
       <div class="copy"><code id="pair">{{PAIR_URL}}</code><button data-copy="pair">Копировать</button></div>
     </div>
+  </section>
+
+  <section class="card" id="pc">
+    <h2>Другой компьютер: общий буфер между ПК</h2>
+    <p class="muted">Связь настраивается на одном из двух ПК и работает в обе стороны: текст, картинки и файлы.
+      Три ПК и больше связывайте попарно.</p>
+    <p>Адрес этого ПК (<b>{{NAME}}</b>) — вставьте его на другом компьютере:</p>
+    <div class="copy"><code id="self">{{API_URL}}</code><button data-copy="self">Копировать</button></div>
+    <p>Или вставьте сюда адрес другого ПК (на нём: трей → «Связать с другим ПК…»):</p>
+    <form class="link" id="peer-form">
+      <input id="peer-link" placeholder="http://192.168.0.20:8765/api/clip?t=…" autocomplete="off" required>
+      <button class="primary" id="peer-add">Связать</button>
+    </form>
+    <p class="error" id="peer-error"></p>
+    <ul class="peers" id="peers"></ul>
   </section>
 
   <section class="card">
@@ -91,6 +117,60 @@
       setTimeout(() => (b.textContent = "Копировать"), 1500);
     };
   });
+
+  // ---------- связанные ПК ----------
+  const $ = (id) => document.getElementById(id);
+
+  function showPeers(peers) {
+    $("peers").replaceChildren(...peers.map((p) => {
+      const li = document.createElement("li");
+      const dot = document.createElement("span");
+      dot.className = "dot" + (p.connected ? " on" : "");
+      const text = document.createElement("div");
+      text.className = "grow";
+      const name = document.createElement("div");
+      name.className = "name";
+      name.textContent = p.name;
+      const state = document.createElement("div");
+      state.className = "muted";
+      state.textContent = p.incoming
+        ? "связан с вами с того ПК"
+        : (p.connected ? "на связи · " : "нет связи · ") + p.url;
+      text.append(name, state);
+      const remove = document.createElement("button");
+      remove.textContent = "Отвязать";
+      remove.onclick = async () => showPeers(await (await fetch(`/pair/peers/${p.id}`, { method: "DELETE" })).json());
+      li.append(dot, text, remove);
+      return li;
+    }));
+  }
+
+  async function refresh() {
+    try { showPeers(await (await fetch("/pair/peers")).json()); } catch {}
+  }
+
+  $("peer-form").onsubmit = async (e) => {
+    e.preventDefault();
+    $("peer-add").disabled = true;
+    $("peer-error").textContent = "";
+    try {
+      const r = await fetch("/pair/peers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ link: $("peer-link").value }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      showPeers(await r.json());
+      $("peer-link").value = "";
+      setTimeout(refresh, 1500);
+    } catch (err) {
+      $("peer-error").textContent = err.message;
+    } finally {
+      $("peer-add").disabled = false;
+    }
+  };
+  refresh();
+  setInterval(refresh, 5000);
 </script>
 </body>
 </html>

@@ -1,4 +1,5 @@
 """Конфиг агента: порт и токен доступа, хранятся в %APPDATA%\\phonenect."""
+import hashlib
 import json
 import os
 import re
@@ -10,7 +11,7 @@ from pathlib import Path
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "phonenect"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_PORT = 8765
-MDNS_HOST = "phonenect.local"
+MDNS_HOST = "phonenect.local"  # общее имя из первых версий: на нём настроены старые команды iPhone
 
 
 def load() -> dict:
@@ -35,6 +36,21 @@ def load() -> dict:
 def save(cfg: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2), "utf-8")
+
+
+def pc_name(cfg: dict) -> str:
+    """Как этот ПК видят телефоны и другие ПК. Можно задать полем "name" в config.json."""
+    return (cfg.get("name") or socket.gethostname())[:40]
+
+
+def pc_id(token: str) -> str:
+    """Постоянный идентификатор ПК для поиска в сети. Из него токен не восстановить."""
+    return hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
+def mdns_host(token: str) -> str:
+    """Своё имя ПК в сети: если ПК с Phonenect несколько, phonenect.local у них общий."""
+    return f"phonenect-{pc_id(token)}.local"
 
 
 def files_dir(cfg: dict) -> Path:

@@ -1,8 +1,8 @@
-"""Объявляет ПК в сети как phonenect.local (Bonjour/mDNS), чтобы смена IP не ломала команды."""
+"""Объявляет ПК в сети (Bonjour/mDNS) как phonenect-<id>.local и phonenect.local, чтобы смена IP не ломала команды."""
 import socket
 import threading
 
-from zeroconf import IPVersion, ServiceInfo, Zeroconf
+from zeroconf import IPVersion, ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 
 from . import config
 
@@ -10,27 +10,62 @@ SERVICE = "_phonenect._tcp.local."
 RECHECK = 60  # секунд: IP мог смениться (переподключение Wi-Fi, DHCP)
 
 
+def find(pc_id: str, timeout: float = 5) -> tuple[str, int] | None:
+    """Ищет в сети Phonenect с данным id (связанный ПК сменил IP). Блокирует — звать в потоке."""
+    found = threading.Event()
+    result: list[tuple[str, int]] = []
+
+    class Listener(ServiceListener):
+        def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+            info = zc.get_service_info(type_, name, timeout=2000)
+            if info and info.properties.get(b"id") == pc_id.encode() and info.parsed_addresses():
+                result.append((info.parsed_addresses()[0], info.port))
+                found.set()
+
+        update_service = add_service
+
+        def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+            pass
+
+    zc = Zeroconf(ip_version=IPVersion.V4Only)
+    try:
+        browser = ServiceBrowser(zc, SERVICE, Listener())
+        found.wait(timeout)
+        browser.cancel()
+    finally:
+        zc.close()
+    return result[0] if result else None
+
+
 class Advertiser:
     def __init__(self, cfg: dict) -> None:
         self.cfg = cfg
         self.ip: str | None = None
         self.zc: Zeroconf | None = None
-        self.info: ServiceInfo | None = None
+        self.infos: list[ServiceInfo] = []
         self._stop = threading.Event()
 
     def _register(self, ip: str) -> None:
         self._unregister()
         # Слушаем только интерфейс домашней сети, чтобы не светиться в VPN-туннеле.
         self.zc = Zeroconf(interfaces=[ip], ip_version=IPVersion.V4Only)
-        self.info = ServiceInfo(
-            SERVICE,
-            f"Phonenect.{SERVICE}",
-            addresses=[socket.inet_aton(ip)],
-            port=self.cfg["port"],
-            server=config.MDNS_HOST + ".",
-            properties={"path": "/"},
-        )
-        self.zc.register_service(self.info, allow_name_change=True)
+        name = config.pc_name(self.cfg)
+        # Своё имя — для новых команд iPhone; общее phonenect.local — для настроенных раньше.
+        hosts = [(config.mdns_host(self.cfg["token"]), ""), (config.MDNS_HOST, " (общее имя)")]
+        self.infos = [
+            ServiceInfo(
+                SERVICE,
+                f"Phonenect {name}{suffix}.{SERVICE}",
+                addresses=[socket.inet_aton(ip)],
+                port=self.cfg["port"],
+                server=host + ".",
+                # id отличает ПК друг от друга: телефон после смены IP ищет именно свой.
+                properties={"path": "/", "id": config.pc_id(self.cfg["token"]), "name": name},
+            )
+            for host, suffix in hosts
+        ]
+        for info in self.infos:
+            self.zc.register_service(info, allow_name_change=True)
         self.ip = ip
 
     def _unregister(self) -> None:
