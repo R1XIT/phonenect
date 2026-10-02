@@ -62,13 +62,163 @@ def test_broken_server_files_are_recreated(tmp_path):
     assert certs.ensure_server_cert(tmp_path, "192.168.0.25", ID) is True
 
 
-def test_python_client_trusting_ca_accepts_server_chain(tmp_path):
+def test_server_cert_reissued_when_ca_changes(tmp_path):
+    """При смене CA старый сертификат сервера перевыпускается."""
+    old_ca = certs.ensure_ca(tmp_path, "ДОМ")
+    certs.ensure_server_cert(tmp_path, "192.168.0.25", ID)
+    old_leaf = load_server(tmp_path)[0]
+
+    # Удалить старый CA
+    (tmp_path / "ca.pem").unlink()
+    (tmp_path / "ca.key").unlink()
+
+    # Создать новый CA
+    new_ca = certs.ensure_ca(tmp_path, "ДОМ")
+    assert certs.fingerprint(old_ca) != certs.fingerprint(new_ca)
+
+    # Сертификат сервера должен быть переиздан для нового CA
+    assert certs.ensure_server_cert(tmp_path, "192.168.0.25", ID) is True
+    new_leaf = load_server(tmp_path)[0]
+
+    # Новый лист должен быть выдан новым CA
+    new_ca_from_chain = load_server(tmp_path)[1]
+    assert certs.fingerprint(new_ca_from_chain) == certs.fingerprint(new_ca), "Цепочка содержит новый CA"
+    old_leaf.verify_directly_issued_by(old_ca)
+    new_leaf.verify_directly_issued_by(new_ca)
+
+
+def test_ensure_server_cert_requires_ca(tmp_path):
+    """ensure_server_cert падает с RuntimeError если CA отсутствует."""
+    import pytest
+    with pytest.raises(RuntimeError, match="Нет сертификата CA"):
+        certs.ensure_server_cert(tmp_path, "192.168.0.25", ID)
+
+
+def test_real_tls_handshake_with_server_chain(tmp_path):
+    """TLS handshake успешен когда клиент доверяет CA."""
     certs.ensure_ca(tmp_path, "ДОМ")
     certs.ensure_server_cert(tmp_path, "192.168.0.25", ID)
-    server = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-    server.load_cert_chain(*certs.server_files(tmp_path))  # не падает: ключ и цепочка согласованы
-    client = ssl.create_default_context(cadata=certs.ca_pem(tmp_path).decode())
-    assert client.get_ca_certs()[0]["subject"]
+    pem_path, key_path = certs.server_files(tmp_path)
+    ca_pem = certs.ca_pem(tmp_path)
+
+    # Сервер с сертификатом
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.load_cert_chain(pem_path, key_path)
+
+    # Клиент доверяет CA этого сервера
+    client_ctx = ssl.create_default_context(cadata=ca_pem.decode())
+    client_ctx.check_hostname = True
+    client_ctx.server_hostname = "localhost"
+
+    # Handshake в памяти через MemoryBIO
+    server_bio_in = ssl.MemoryBIO()
+    server_bio_out = ssl.MemoryBIO()
+    client_bio_in = ssl.MemoryBIO()
+    client_bio_out = ssl.MemoryBIO()
+
+    server_conn = server_ctx.wrap_bio(server_bio_in, server_bio_out, server_side=True)
+    client_conn = client_ctx.wrap_bio(client_bio_in, client_bio_out, server_side=False, server_hostname="localhost")
+
+    # Шаттл данных между BIO до успешного handshake
+    client_done = False
+    server_done = False
+
+    for _ in range(100):  # Максимум итераций
+        if not client_done:
+            try:
+                client_conn.do_handshake()
+                client_done = True
+            except ssl.SSLWantReadError:
+                pass
+
+        if not server_done:
+            try:
+                server_conn.do_handshake()
+                server_done = True
+            except ssl.SSLWantReadError:
+                pass
+
+        # Шаттл данных
+        client_to_server = client_bio_out.pending
+        if client_to_server:
+            server_bio_in.write(client_bio_out.read())
+
+        server_to_client = server_bio_out.pending
+        if server_to_client:
+            client_bio_in.write(server_bio_out.read())
+
+        if client_done and server_done:
+            break
+
+    assert client_done and server_done, "Handshake не успел завершиться"
+
+
+def test_tls_handshake_fails_with_different_ca(tmp_path):
+    """TLS handshake не удаётся когда клиент доверяет другому CA."""
+    import pytest
+
+    # Создать два разных CA
+    dir1 = tmp_path / "dir1"
+    dir2 = tmp_path / "dir2"
+    dir1.mkdir()
+    dir2.mkdir()
+
+    certs.ensure_ca(dir1, "ДОМ1")
+    certs.ensure_ca(dir2, "ДОМ2")
+    certs.ensure_server_cert(dir1, "192.168.0.25", ID)
+
+    pem_path, key_path = certs.server_files(dir1)
+    ca_pem_2 = certs.ca_pem(dir2)  # Клиент доверяет другому CA
+
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.load_cert_chain(pem_path, key_path)
+
+    client_ctx = ssl.create_default_context(cadata=ca_pem_2.decode())
+    client_ctx.check_hostname = False  # Пропустить проверку имени хоста
+
+    server_bio_in = ssl.MemoryBIO()
+    server_bio_out = ssl.MemoryBIO()
+    client_bio_in = ssl.MemoryBIO()
+    client_bio_out = ssl.MemoryBIO()
+
+    server_conn = server_ctx.wrap_bio(server_bio_in, server_bio_out, server_side=True)
+    client_conn = client_ctx.wrap_bio(client_bio_in, client_bio_out, server_side=False, server_hostname="localhost")
+
+    # Попытаться выполнить handshake — должно упасть с ошибкой верификации
+    client_error = None
+    server_error = None
+
+    for _ in range(100):
+        if not client_error:
+            try:
+                client_conn.do_handshake()
+            except ssl.SSLWantReadError:
+                pass
+            except ssl.SSLCertVerificationError as e:
+                client_error = e
+
+        if not server_error:
+            try:
+                server_conn.do_handshake()
+            except ssl.SSLWantReadError:
+                pass
+            except (ssl.SSLError, ssl.SSLCertVerificationError) as e:
+                server_error = e
+
+        # Шаттл данных
+        client_to_server = client_bio_out.pending
+        if client_to_server:
+            server_bio_in.write(client_bio_out.read())
+
+        server_to_client = server_bio_out.pending
+        if server_to_client:
+            client_bio_in.write(server_bio_out.read())
+
+        if client_error or server_error:
+            break
+
+    # Должна быть ошибка верификации
+    assert client_error is not None or server_error is not None, "Handshake должен был упасть с разными CA"
 
 
 def test_mobileconfig_contains_the_ca(tmp_path):

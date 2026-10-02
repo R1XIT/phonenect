@@ -93,14 +93,35 @@ def _names(ip: str, pc_id: str) -> list[x509.GeneralName]:
 
 
 def _current_is_fine(d: Path, ip: str) -> bool:
-    pem, key = server_files(d)
+    pem, key_path = server_files(d)
     try:
         leaf = x509.load_pem_x509_certificates(pem.read_bytes())[0]
-        serialization.load_pem_private_key(key.read_bytes(), password=None)
+        key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+        ca_cert = x509.load_pem_x509_certificate((d / "ca.pem").read_bytes())
     except (OSError, ValueError, IndexError):
         return False
-    ips = {str(v) for v in leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-           .get_values_for_type(x509.IPAddress)}
+
+    # Проверить, что сертификат выдан текущим CA
+    if leaf.issuer != ca_cert.subject:
+        return False
+    try:
+        leaf.verify_directly_issued_by(ca_cert)
+    except Exception:  # x509.InvalidSignature или другие ошибки верификации
+        return False
+
+    # Проверить, что приватный ключ соответствует сертификату
+    if key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    ) != leaf.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    ):
+        return False
+
+    try:
+        ips = {str(v) for v in leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+               .get_values_for_type(x509.IPAddress)}
+    except x509.ExtensionNotFound:
+        return False
     return ip in ips and leaf.not_valid_after_utc - now() > RENEW_BEFORE
 
 
@@ -108,7 +129,10 @@ def ensure_server_cert(d: Path, ip: str, pc_id: str) -> bool:
     """Сертификат сервера на текущий IP. True — выпущен новый (контекст TLS надо перечитать)."""
     if _current_is_fine(d, ip):
         return False
-    ca_cert, ca_key = _load_ca(d)
+    loaded = _load_ca(d)
+    if not loaded:
+        raise RuntimeError("Нет сертификата CA: сначала вызовите ensure_ca")
+    ca_cert, ca_key = loaded
     key = ec.generate_private_key(ec.SECP256R1())
     cert = (
         x509.CertificateBuilder()
