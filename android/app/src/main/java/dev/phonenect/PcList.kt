@@ -5,7 +5,10 @@ import java.net.URLDecoder
 import java.security.MessageDigest
 
 /** Компьютер с Phonenect. id — как config.pc_id на ПК: по нему ПК находится в сети после смены IP. */
-data class Pc(val id: String, val name: String, val url: String, val token: String)
+data class Pc(val id: String, val name: String, val url: String, val token: String, val fp: String, val ca: String = "")
+
+/** Подключён до шифрования (или CA ещё не получен): служба к такому ПК не подключается, экран просит переподключить. */
+val Pc.needsRepair: Boolean get() = fp.isEmpty() || ca.isEmpty() || !url.startsWith("https://")
 
 /** Список ПК, с которыми связан телефон; буфер общий с одним, активным. Без Android — чтобы проверять тестами. */
 data class PcList(val items: List<Pc> = emptyList(), val activeId: String? = null) {
@@ -17,7 +20,9 @@ data class PcList(val items: List<Pc> = emptyList(), val activeId: String? = nul
             ?: return PcList(items + pc, pc.id)
         // В адресе API имени нет — вместо него хост; известное имя не затираем.
         val name = if (pc.name == hostOf(pc.url)) known.name else pc.name
-        return PcList(items.map { if (it.id == pc.id) pc.copy(name = name) else it }, pc.id)
+        // Уже полученный CA сохраняем, если отпечаток тот же; иначе берём CA нового.
+        val ca = if (pc.ca.isEmpty() && pc.fp == known.fp) known.ca else pc.ca
+        return PcList(items.map { if (it.id == pc.id) pc.copy(name = name, ca = ca) else it }, pc.id)
     }
 
     fun activate(id: String) = if (items.any { it.id == id }) copy(activeId = id) else this
@@ -52,13 +57,18 @@ data class PcList(val items: List<Pc> = emptyList(), val activeId: String? = nul
                 k to URLDecoder.decode(v, "UTF-8")
             }.toMap()
             val token = query["t"]?.takeIf { it.isNotEmpty() } ?: return null
+            val fp = query["fp"]?.lowercase()?.takeIf { it.length == 64 } ?: return null
             val base = when (uri.scheme) {
-                "phonenect" -> query["url"]
-                "http", "https" -> if (uri.rawAuthority != null) "${uri.scheme}://${uri.rawAuthority}" else null
+                "phonenect" -> query["url"]?.takeIf { it.startsWith("https://") }
+                "https" -> if (uri.rawAuthority != null) "https://${uri.rawAuthority}" else null
                 else -> null
             }?.trimEnd('/') ?: return null
-            return Pc(idFor(token), query["name"]?.takeIf { it.isNotBlank() } ?: hostOf(base), base, token)
+            return Pc(idFor(token), query["name"]?.takeIf { it.isNotBlank() } ?: hostOf(base), base, token, fp)
         }
+
+        /** Ссылка Phonenect, но без шифрования: из старой версии. */
+        fun isOldLink(link: String): Boolean = parseLink(link) == null &&
+            Regex("[?&]t=").containsMatchIn(link) && (link.startsWith("http://") || link.startsWith("phonenect://"))
 
         fun hostOf(url: String): String = try {
             URI(url).host

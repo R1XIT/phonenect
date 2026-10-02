@@ -1,30 +1,46 @@
 package dev.phonenect
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PcListTest {
-    private val home = PcList.parseLink("phonenect://pair?url=http%3A%2F%2F192.168.0.25%3A8765&t=HOME&name=%D0%94%D0%BE%D0%BC")!!
-    private val work = PcList.parseLink("http://192.168.0.40:8765/api/clip?t=WORK")!!
+    private val fp = "a".repeat(64)
+    private val home = PcList.parseLink("phonenect://pair?url=https%3A%2F%2F192.168.0.25%3A8765&t=HOME&name=%D0%94%D0%BE%D0%BC&fp=$fp")!!
+    private val work = PcList.parseLink("https://192.168.0.40:8765/api/clip?t=WORK&fp=$fp")!!
 
     @Test
     fun parsesPairLinkWithName() {
-        assertEquals("http://192.168.0.25:8765", home.url)
+        assertEquals("https://192.168.0.25:8765", home.url)
         assertEquals("HOME", home.token)
         assertEquals("Дом", home.name)
     }
 
     @Test
     fun parsesApiAddressWithoutNameUsingHost() {
-        assertEquals("http://192.168.0.40:8765", work.url)
+        assertEquals("https://192.168.0.40:8765", work.url)
         assertEquals("192.168.0.40", work.name)
     }
 
     @Test
     fun rejectsLinksWithoutToken() {
-        assertNull(PcList.parseLink("http://192.168.0.40:8765/"))
+        assertNull(PcList.parseLink("https://192.168.0.40:8765/"))
         assertNull(PcList.parseLink("просто текст"))
+    }
+
+    @Test
+    fun rejectsOldLinksWithoutEncryption() {
+        assertNull(PcList.parseLink("phonenect://pair?url=http%3A%2F%2F192.168.0.25%3A8765&t=HOME"))
+        assertNull(PcList.parseLink("https://192.168.0.40:8765/api/clip?t=WORK"))
+        assertTrue(PcList.isOldLink("http://192.168.0.40:8765/api/clip?t=WORK"))
+        assertFalse(PcList.isOldLink("просто текст"))
+    }
+
+    @Test
+    fun keepsFingerprint() {
+        assertEquals(fp, home.fp)
     }
 
     @Test
@@ -42,10 +58,10 @@ class PcListTest {
 
     @Test
     fun addingSamePcAgainUpdatesAddressInsteadOfDuplicating() {
-        val moved = home.copy(url = "http://192.168.0.99:8765")
+        val moved = home.copy(url = "https://192.168.0.99:8765")
         val list = PcList().add(home).add(work).add(moved)
         assertEquals(2, list.items.size)
-        assertEquals("http://192.168.0.99:8765", list.items.first { it.token == "HOME" }.url)
+        assertEquals("https://192.168.0.99:8765", list.items.first { it.token == "HOME" }.url)
         assertEquals("HOME", list.active?.token)
     }
 
@@ -66,16 +82,17 @@ class PcListTest {
     @Test
     fun newIpChangesOnlyThatPc() {
         val list = PcList().add(home).add(work).moved(home.id, "192.168.0.77", 8765)
+        // moved пока ставит http — на https его переведёт следующая задача
         assertEquals("http://192.168.0.77:8765", list.items.first { it.token == "HOME" }.url)
-        assertEquals("http://192.168.0.40:8765", list.items.first { it.token == "WORK" }.url)
+        assertEquals("https://192.168.0.40:8765", list.items.first { it.token == "WORK" }.url)
     }
 
     @Test
     fun readdingByAddressKeepsKnownName() {
         val named = PcList().add(work).renamed(work.id, "Ноутбук")
-        val again = named.add(PcList.parseLink("http://192.168.0.41:8765/api/clip?t=WORK")!!)
+        val again = named.add(PcList.parseLink("https://192.168.0.41:8765/api/clip?t=WORK&fp=$fp")!!)
         assertEquals("Ноутбук", again.active?.name)
-        assertEquals("http://192.168.0.41:8765", again.active?.url)
+        assertEquals("https://192.168.0.41:8765", again.active?.url)
     }
 
     @Test

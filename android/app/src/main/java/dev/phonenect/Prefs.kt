@@ -18,13 +18,14 @@ class Prefs(context: Context) {
             migrate()
             val array = JSONArray(sp.getString("pcs", "[]"))
             val items = (0 until array.length()).map { i ->
-                array.getJSONObject(i).run { Pc(getString("id"), getString("name"), getString("url"), getString("token")) }
+                array.getJSONObject(i).run { Pc(getString("id"), getString("name"), getString("url"), getString("token"), optString("fp"), optString("ca")) }
             }
             PcList(items, sp.getString("active", null))
         }
         set(value) = synchronized(LOCK) {
             val array = JSONArray(value.items.map { pc ->
                 JSONObject().put("id", pc.id).put("name", pc.name).put("url", pc.url).put("token", pc.token)
+                    .put("fp", pc.fp).put("ca", pc.ca)
             })
             sp.edit().putString("pcs", array.toString()).putString("active", value.activeId).apply()
         }
@@ -67,6 +68,6 @@ class Prefs(context: Context) {
         sp.edit().remove("base_url").remove("token").apply()
         if (token.isNullOrEmpty()) return
         val host = url.substringAfter("://").substringBefore(":")
-        pcs = PcList().add(Pc(PcList.idFor(token), host, url, token))
+        pcs = PcList().add(Pc(PcList.idFor(token), host, url, token, fp = ""))
     }
 }
