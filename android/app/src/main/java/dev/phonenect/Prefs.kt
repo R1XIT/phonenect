@@ -37,11 +37,9 @@ class Prefs(context: Context) {
     val token: String? get() = active?.token
     val configured: Boolean get() = active != null
 
-    /** Добавляет ПК по ссылке и делает его активным. null — ссылка не от Phonenect. */
-    fun applyLink(link: String): Pc? {
-        val pc = PcList.parseLink(link) ?: return null
+    /** Добавляет ПК (с уже проверенным CA) и делает его активным. */
+    fun add(pc: Pc) {
         update { it.add(pc) }
-        return pc
     }
 
     /** ПК сменил IP — меняем только хост, порт и токен прежние. */

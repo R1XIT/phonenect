@@ -32,7 +32,7 @@ data class PcList(val items: List<Pc> = emptyList(), val activeId: String? = nul
         return PcList(rest, if (activeId == id) rest.firstOrNull()?.id else activeId)
     }
 
-    fun moved(id: String, host: String, port: Int) = update(id) { it.copy(url = "http://$host:$port") }
+    fun moved(id: String, host: String, port: Int) = update(id) { it.copy(url = "https://$host:$port") }
 
     fun renamed(id: String, name: String) = update(id) { it.copy(name = name) }
 
@@ -43,8 +43,8 @@ data class PcList(val items: List<Pc> = emptyList(), val activeId: String? = nul
             MessageDigest.getInstance("SHA-256").digest(token.toByteArray()).joinToString("") { "%02x".format(it) }.take(12)
 
         /**
-         * phonenect://pair?url=http://host:port&t=TOKEN&name=… (кнопка в веб-клиенте)
-         * или адрес API со страницы: http://host:port/api/clip?t=TOKEN.
+         * phonenect://pair?url=https://host:port&t=TOKEN&fp=…&name=… (кнопка в веб-клиенте)
+         * или адрес API со страницы: https://host:port/api/clip?t=TOKEN&fp=….
          */
         fun parseLink(link: String): Pc? {
             val uri = try {
@@ -57,7 +57,7 @@ data class PcList(val items: List<Pc> = emptyList(), val activeId: String? = nul
                 k to URLDecoder.decode(v, "UTF-8")
             }.toMap()
             val token = query["t"]?.takeIf { it.isNotEmpty() } ?: return null
-            val fp = query["fp"]?.lowercase()?.takeIf { it.length == 64 } ?: return null
+            val fp = query["fp"]?.lowercase()?.takeIf { FP.matches(it) } ?: return null
             val base = when (uri.scheme) {
                 "phonenect" -> query["url"]?.takeIf { it.startsWith("https://") }
                 "https" -> if (uri.rawAuthority != null) "https://${uri.rawAuthority}" else null
@@ -66,9 +66,14 @@ data class PcList(val items: List<Pc> = emptyList(), val activeId: String? = nul
             return Pc(idFor(token), query["name"]?.takeIf { it.isNotBlank() } ?: hostOf(base), base, token, fp)
         }
 
-        /** Ссылка Phonenect, но без шифрования: из старой версии. */
-        fun isOldLink(link: String): Boolean = parseLink(link) == null &&
-            Regex("[?&]t=").containsMatchIn(link) && (link.startsWith("http://") || link.startsWith("phonenect://"))
+        private val FP = Regex("[0-9a-f]{64}")
+
+        /** Ссылка Phonenect, но без шифрования (или без отпечатка): из старой версии. */
+        fun isOldLink(link: String): Boolean {
+            val text = link.trim()
+            return parseLink(text) == null && Regex("[?&]t=").containsMatchIn(text) &&
+                listOf("http://", "https://", "phonenect://").any { text.startsWith(it) }
+        }
 
         fun hostOf(url: String): String = try {
             URI(url).host

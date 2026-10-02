@@ -1,6 +1,5 @@
 package dev.phonenect
 
-import android.app.DownloadManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -14,7 +13,6 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -116,6 +114,12 @@ class SyncService : Service() {
     private val baseUrl: String? get() = pc?.url
     private val token: String? get() = pc?.token
 
+    /** Клиент с CA этого ПК. null — ПК подключён до шифрования: тогда в сеть не ходим вовсе. */
+    @Volatile
+    private var client: OkHttpClient? = null
+
+    private fun client(): OkHttpClient = client ?: throw IOException("ПК подключён без шифрования")
+
     // Защита от эха: то, что мы сами положили в буфер, обратно не отправляем.
     @Volatile
     private var ownDigest: String? = null
@@ -152,6 +156,14 @@ class SyncService : Service() {
             return START_NOT_STICKY
         }
         if (pc == null) pc = prefs.active
+        // Скачивание по уведомлению идёт с того ПК, откуда оно пришло, — не зависит от активного.
+        if (intent?.action == ACTION_DOWNLOAD) downloadTapped(intent)
+        val current = pc
+        if (current == null || current.needsRepair) {
+            updateStatus(getString(R.string.status_repair))
+            return START_STICKY  // не подключаемся без шифрования; экран подскажет, что делать
+        }
+        if (client == null) client = Tls.pinnedClient(http, current.ca)
         if (socket == null) connect()
         if (intent == null) return START_STICKY
         when (intent.action) {
@@ -168,15 +180,16 @@ class SyncService : Service() {
                     }
                 }
             }
-            ACTION_DOWNLOAD -> {
-                val id = intent.getIntExtra("id", 0)
-                getSystemService(NotificationManager::class.java).cancel(1000 + id)
-                // Качаем с того ПК, откуда пришло уведомление, даже если активный уже другой.
-                val from = prefs.pcs.items.firstOrNull { it.id == intent.getStringExtra("pc") } ?: return START_STICKY
-                download(id, intent.getStringExtra("name").orEmpty(), intent.getStringExtra("mime"), from)
-            }
         }
         return START_STICKY
+    }
+
+    private fun downloadTapped(intent: Intent) {
+        val id = intent.getIntExtra("id", 0)
+        getSystemService(NotificationManager::class.java).cancel(1000 + id)
+        // Качаем с того ПК, откуда пришло уведомление, даже если активный уже другой.
+        val from = prefs.pcs.items.firstOrNull { it.id == intent.getStringExtra("pc") } ?: return
+        download(id, intent.getStringExtra("name").orEmpty(), intent.getStringExtra("mime"), from)
     }
 
     override fun onDestroy() {
@@ -212,15 +225,16 @@ class SyncService : Service() {
 
     private fun connect() {
         val base = baseUrl ?: return
+        val secure = client ?: return
         val request = Request.Builder()
-            .url(base.replaceFirst("http", "ws") + "/ws")
+            .url(base.replaceFirst("http", "ws") + "/ws") // https → wss
             .header("Authorization", "Bearer $token")
             .build()
-        socket = http.newWebSocket(request, object : WebSocketListener() {
+        socket = secure.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 failures = 0
                 connected = true
-                updateStatus(getString(R.string.status_connected, pc?.name ?: base.removePrefix("http://")))
+                updateStatus(getString(R.string.status_connected, pc?.name ?: base.removePrefix("https://")))
                 io.execute(::fetchName)
             }
 
@@ -271,7 +285,7 @@ class SyncService : Service() {
             pc?.let { pc ->
                 Discovery.find(this, pc.id) { host, port ->
                     prefs.replaceHost(pc.id, host, port)
-                    this.pc = pc.copy(url = "http://$host:$port")
+                    this.pc = pc.copy(url = "https://$host:$port")
                 }
             }
         }
@@ -308,27 +322,22 @@ class SyncService : Service() {
 
     // ---------- файлы ----------
 
-    /** Качает файл с ПК в «Загрузки/Phonenect»; прогресс и «Открыть» показывает сам Android. */
+    /** Качает файл с ПК в «Загрузки/Phonenect» сам (с CA этого ПК); по готовности — уведомление «открыть». */
     private fun download(id: Int, name: String, mime: String?, source: Pc? = pc) {
-        val from = source ?: return
+        val from = source?.takeUnless { it.needsRepair } ?: return
         val base = from.url
         val safe = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "Файл" }
-        val request = DownloadManager.Request(Uri.parse("$base/api/clip/$id"))
-            .addRequestHeader("Authorization", "Bearer ${from.token}")
-            .setTitle(safe)
-            .setDescription(getString(R.string.download_description))
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        if (mime != null) request.setMimeType(mime)
-        try {
-            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "Phonenect/$safe")
-        } catch (e: Exception) {
-            // До Android 10 общая папка требует разрешения на память — тогда кладём в папку приложения.
-            request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, safe)
-        }
-        try {
-            getSystemService(DownloadManager::class.java).enqueue(request)
-        } catch (e: Exception) {
-            Log.w(TAG, "download failed", e)
+        uploads.execute {
+            val notifyId = 2000 + id
+            fileStatus(notifyId, getString(R.string.download_progress), safe, ongoing = true, open = null)
+            try {
+                val request = Request.Builder().url("$base/api/clip/$id").header("Authorization", "Bearer ${from.token}").build()
+                val uri = FileDownload.save(this, Tls.pinnedClient(http, from.ca), request, safe, mime)
+                fileStatus(notifyId, getString(R.string.download_done), safe, ongoing = false, open = uri to mime)
+            } catch (e: Exception) {
+                Log.w(TAG, "download failed", e)
+                fileStatus(notifyId, getString(R.string.download_failed), "$safe: ${e.message}", ongoing = false, open = null)
+            }
         }
     }
 
@@ -386,7 +395,7 @@ class SyncService : Service() {
             .header("X-Filename", URLEncoder.encode(name, "UTF-8").replace("+", "%20"))
             .post(body)
             .build()
-        http.newCall(request).execute().use { r ->
+        client().newCall(request).execute().use { r ->
             if (!r.isSuccessful) throw IOException("ПК ответил ${r.code}")
         }
     }
@@ -400,16 +409,28 @@ class SyncService : Service() {
             null
         } ?: uri.lastPathSegment ?: "Файл"
 
-    private fun uploadStatus(title: String, text: String, ongoing: Boolean) {
+    private fun uploadStatus(title: String, text: String, ongoing: Boolean) =
+        fileStatus(UPLOAD_NOTIFICATION_ID, title, text, ongoing, open = null)
+
+    /** Уведомление о передаче файла; open — что открыть по нажатию (файл и его тип). */
+    private fun fileStatus(notifyId: Int, title: String, text: String, ongoing: Boolean, open: Pair<Uri, String?>?) {
         val notification = Notification.Builder(this, FILES_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(text)
             .setOngoing(ongoing)
             .setOnlyAlertOnce(true)
+            .setAutoCancel(true)
             .apply { if (ongoing) setProgress(0, 0, true) }
+            .apply {
+                if (open != null) {
+                    val view = Intent(Intent.ACTION_VIEW).setDataAndType(open.first, open.second)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                    setContentIntent(PendingIntent.getActivity(this@SyncService, notifyId, view, PendingIntent.FLAG_IMMUTABLE))
+                }
+            }
             .build()
-        getSystemService(NotificationManager::class.java).notify(UPLOAD_NOTIFICATION_ID, notification)
+        getSystemService(NotificationManager::class.java).notify(notifyId, notification)
     }
 
     private fun setClip(clip: ClipData, digest: String) {
@@ -420,7 +441,7 @@ class SyncService : Service() {
 
     /** Отправить содержимое буфера на ПК. Повторы сервер отбрасывает сам (X-Auto). */
     fun sendClip(clip: ClipData) {
-        if (clip.itemCount == 0) return
+        if (clip.itemCount == 0 || client == null) return  // без шифрования буфер не отправляем
         val item = clip.getItemAt(0)
         io.execute {
             try {
@@ -445,7 +466,7 @@ class SyncService : Service() {
     private fun get(path: String): ByteArray? {
         val request = Request.Builder().url(baseUrl + path)
             .header("Authorization", "Bearer $token").build()
-        http.newCall(request).execute().use { r -> return if (r.isSuccessful) r.body.bytes() else null }
+        client().newCall(request).execute().use { r -> return if (r.isSuccessful) r.body.bytes() else null }
     }
 
     private fun post(body: ByteArray, type: String, auto: Boolean = true) {
@@ -455,7 +476,7 @@ class SyncService : Service() {
             .apply { if (auto) header("X-Auto", "1") }
             .post(body.toRequestBody(type.toMediaType()))
             .build()
-        http.newCall(request).execute().close()
+        client().newCall(request).execute().close()
     }
 
     // ---------- уведомление ----------

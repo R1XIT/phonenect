@@ -21,6 +21,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import okhttp3.OkHttpClient
 import java.lang.ref.WeakReference
 
 /** Настройка: подключение к ПК и разрешения, без которых автоматика не работает. */
@@ -77,9 +78,37 @@ class MainActivity : Activity() {
 
     private fun handleLink(intent: Intent?) {
         val link = intent?.data?.toString() ?: return
-        val pc = prefs.applyLink(link) ?: return
-        restartSync()
-        Toast.makeText(this, "Подключено к ${pc.name}", Toast.LENGTH_SHORT).show()
+        connect(link)
+    }
+
+    /** Подключение по ссылке: сначала скачиваем и сверяем сертификат ПК, потом сохраняем. */
+    private fun connect(link: String) {
+        val pc = PcList.parseLink(link)
+        if (pc == null) {
+            val text = if (PcList.isOldLink(link)) "Старая ссылка — отсканируйте QR-код с ПК заново" else "Не похоже на адрес Phonenect"
+            Toast.makeText(this, text, Toast.LENGTH_LONG).show()
+            return
+        }
+        Thread {
+            val result = try {
+                prefs.add(pc.copy(ca = Tls.fetchCa(OkHttpClient(), pc.url, pc.fp)))
+                null
+            } catch (e: Tls.Mismatch) {
+                e.message
+            } catch (e: Exception) {
+                "Не удалось связаться с ПК: он включён и в той же сети Wi-Fi?"
+            }
+            runOnUiThread {
+                if (result == null) {
+                    adding = false
+                    restartSync()
+                    Toast.makeText(this, "Подключено к ${pc.name}", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, result, Toast.LENGTH_LONG).show()
+                }
+                render()
+            }
+        }.start()
     }
 
     /** Служба держит связь с одним, активным ПК — после смены ПК запускаем её заново. */
@@ -98,8 +127,9 @@ class MainActivity : Activity() {
         val active = pcs.active
         val status = when {
             active == null -> "Не подключено к ПК"
+            active.needsRepair -> "○ «${active.name}» подключён до шифрования — подключите заново (QR-код или «Настроить Android по USB»)"
             service?.connected == true -> "● Общий буфер с «${active.name}»"
-            else -> "○ Нет связи с «${active.name}» (${active.url.removePrefix("http://")}). Проверьте, что ПК в той же сети Wi-Fi."
+            else -> "○ Нет связи с «${active.name}» (${active.url.removePrefix("https://")}). Проверьте, что ПК в той же сети Wi-Fi."
         }
         text(status, 15f).setPadding(0, dp(6), 0, dp(18))
 
@@ -176,20 +206,12 @@ class MainActivity : Activity() {
             "странице нажмите «Подключить приложение». Новый ПК добавится к списку.")
         text("Или вставьте адрес Phonenect со страницы (раздел «Адрес Phonenect»):").setPadding(0, dp(12), 0, dp(4))
         val input = EditText(this).apply {
-            hint = "http://192.168.0.10:8765/api/clip?t=…"
+            hint = "https://192.168.0.10:8765/api/clip?t=…"
             inputType = InputType.TYPE_TEXT_VARIATION_URI
             setSingleLine()
         }
         root.addView(input)
-        button("Подключить") {
-            if (prefs.applyLink(input.text.toString()) != null) {
-                adding = false
-                restartSync()
-                render()
-            } else {
-                Toast.makeText(this, "Не похоже на адрес Phonenect", Toast.LENGTH_SHORT).show()
-            }
-        }
+        button("Подключить") { connect(input.text.toString()) }
     }
 
     /** Строка списка ПК: касание делает ПК активным, «Удалить» забывает его. */
@@ -207,10 +229,12 @@ class MainActivity : Activity() {
         }
         val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         texts.addView(label((if (isActive) "● " else "○ ") + pc.name, 16f, bold = isActive))
-        texts.addView(label(
-            pc.url.removePrefix("http://") + if (isActive) " · активный" else " · коснитесь, чтобы переключиться",
-            14f, muted = true,
-        ))
+        val hint = when {
+            pc.needsRepair -> "нужно переподключить — отсканируйте QR-код с ПК"
+            isActive -> pc.url.removePrefix("https://") + " · активный"
+            else -> pc.url.removePrefix("https://") + " · коснитесь, чтобы переключиться"
+        }
+        texts.addView(label(hint, 14f, muted = true))
         row.addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         row.addView(Button(this).apply {
             text = "Удалить"

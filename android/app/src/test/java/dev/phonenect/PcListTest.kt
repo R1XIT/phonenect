@@ -82,8 +82,7 @@ class PcListTest {
     @Test
     fun newIpChangesOnlyThatPc() {
         val list = PcList().add(home).add(work).moved(home.id, "192.168.0.77", 8765)
-        // moved пока ставит http — на https его переведёт следующая задача
-        assertEquals("http://192.168.0.77:8765", list.items.first { it.token == "HOME" }.url)
+        assertEquals("https://192.168.0.77:8765", list.items.first { it.token == "HOME" }.url)
         assertEquals("https://192.168.0.40:8765", list.items.first { it.token == "WORK" }.url)
     }
 
@@ -99,5 +98,47 @@ class PcListTest {
     fun renamesPc() {
         val list = PcList().add(work).renamed(work.id, "Ноутбук")
         assertEquals("Ноутбук", list.active?.name)
+    }
+
+    @Test
+    fun needsRepairWithoutFingerprintCaOrHttps() {
+        val full = home.copy(ca = "PEM")
+        assertFalse(full.needsRepair)
+        assertTrue(full.copy(fp = "").needsRepair)
+        assertTrue(full.copy(ca = "").needsRepair)
+        assertTrue(full.copy(url = "http://192.168.0.25:8765").needsRepair)
+    }
+
+    @Test
+    fun readdingWithSameFingerprintKeepsKnownCa() {
+        val list = PcList().add(home.copy(ca = "PEM")).add(home.copy(url = "https://192.168.0.26:8765"))
+        assertEquals("PEM", list.active?.ca)
+    }
+
+    @Test
+    fun readdingWithOtherFingerprintDropsKnownCa() {
+        val list = PcList().add(home.copy(ca = "PEM")).add(home.copy(fp = "b".repeat(64)))
+        assertEquals("", list.active?.ca)
+    }
+
+    @Test
+    fun uppercaseFingerprintIsLowercased() {
+        val pc = PcList.parseLink("https://192.168.0.40:8765/api/clip?t=WORK&fp=${"AB".repeat(32)}")
+        assertEquals("ab".repeat(32), pc?.fp)
+    }
+
+    @Test
+    fun nonHexFingerprintIsRejected() {
+        assertNull(PcList.parseLink("https://192.168.0.40:8765/api/clip?t=WORK&fp=${"z".repeat(64)}"))
+    }
+
+    @Test
+    fun oldLinkDetection() {
+        assertTrue(PcList.isOldLink("https://192.168.0.40:8765/api/clip?t=WORK"))
+        assertTrue(PcList.isOldLink("https://192.168.0.40:8765/api/clip?t=WORK&fp=${"z".repeat(64)}"))
+        assertTrue(PcList.isOldLink("  http://192.168.0.40:8765/api/clip?t=WORK"))
+        assertTrue(PcList.isOldLink(" phonenect://pair?url=http%3A%2F%2F192.168.0.25%3A8765&t=HOME"))
+        assertFalse(PcList.isOldLink("https://192.168.0.40:8765/api/clip?t=WORK&fp=$fp"))
+        assertFalse(PcList.isOldLink("https://192.168.0.40:8765/"))
     }
 }

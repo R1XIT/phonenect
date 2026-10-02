@@ -6,11 +6,13 @@ import android.content.Context
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
+import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import java.io.File
 
-/** Отдаёт картинки, пришедшие с ПК, приложениям, которые вставляют их из буфера. */
+/** Отдаёт картинки, пришедшие с ПК, приложениям, которые вставляют их из буфера, и скачанные файлы на Android 8–9. */
 class ImageProvider : ContentProvider() {
     companion object {
         fun dir(context: Context) = File(context.cacheDir, "clips").apply { mkdirs() }
@@ -18,19 +20,26 @@ class ImageProvider : ContentProvider() {
         fun uriFor(context: Context, file: File): Uri =
             Uri.parse("content://${context.packageName}.images/${file.name}")
 
-        private val MIME = mapOf("png" to "image/png", "jpg" to "image/jpeg", "gif" to "image/gif", "webp" to "image/webp")
+        /** Скачанный с ПК файл на Android 8–9 (там он лежит в папке приложения). Имя кодируем: в нём бывают пробелы и «#». */
+        fun uriForDownload(context: Context, file: File): Uri =
+            Uri.Builder().scheme("content").authority("${context.packageName}.images")
+                .appendPath("downloads").appendPath(file.name).build()
+
+        fun downloads(context: Context) = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Phonenect")
     }
 
     override fun onCreate() = true
 
     private fun file(uri: Uri): File {
         val name = uri.lastPathSegment ?: throw IllegalArgumentException(uri.toString())
-        val f = File(dir(context!!), name)
-        require(f.canonicalPath.startsWith(dir(context!!).canonicalPath)) { "bad path" }
+        val dir = if (uri.pathSegments.firstOrNull() == "downloads") downloads(context!!) else dir(context!!)
+        val f = File(dir, name)
+        require(f.canonicalPath.startsWith(dir.canonicalPath + File.separator)) { "bad path" }
         return f
     }
 
-    override fun getType(uri: Uri) = MIME[file(uri).extension] ?: "image/png"
+    override fun getType(uri: Uri) =
+        MimeTypeMap.getSingleton().getMimeTypeFromExtension(file(uri).extension.lowercase()) ?: "application/octet-stream"
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor =
         ParcelFileDescriptor.open(file(uri), ParcelFileDescriptor.MODE_READ_ONLY)

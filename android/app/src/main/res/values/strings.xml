@@ -7,7 +7,10 @@
     <string name="status_offline">Нет связи с ПК — переподключаюсь</string>
     <string name="share_label">На ПК</string>
     <string name="files_channel_name">Файлы</string>
-    <string name="download_description">Файл с ПК</string>
+    <string name="status_repair">Подключите ПК заново: связь теперь шифруется</string>
+    <string name="download_progress">Скачивание с ПК</string>
+    <string name="download_done">Скачано — нажмите, чтобы открыть</string>
+    <string name="download_failed">Не удалось скачать с ПК</string>
     <string name="file_offer_title">Файл с ПК: %1$s</string>
     <string name="file_offer_text">%1$s — нажмите, чтобы скачать</string>
     <string name="upload_progress">Отправка на ПК</string>
