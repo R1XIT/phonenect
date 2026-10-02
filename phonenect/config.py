@@ -11,6 +11,7 @@ from pathlib import Path
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "phonenect"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_PORT = 8765
+DEFAULT_SETUP_PORT = 8766  # открытый HTTP-порт со стартовой страницей: сертификат без секретов
 MDNS_HOST = "phonenect.local"  # общее имя из первых версий: на нём настроены старые команды iPhone
 
 
@@ -27,6 +28,9 @@ def load() -> dict:
         changed = True
     if not cfg.get("port"):
         cfg["port"] = DEFAULT_PORT
+        changed = True
+    if not cfg.get("setup_port"):
+        cfg["setup_port"] = DEFAULT_SETUP_PORT
         changed = True
     if changed:
         save(cfg)

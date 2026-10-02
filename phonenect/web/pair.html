@@ -46,14 +46,26 @@
   <h1>Подключить телефон</h1>
   <p class="lead">Телефон и ПК должны быть в одной сети Wi-Fi.</p>
 
+  <section class="card">
+    <h2>Шаг 1. Сертификат</h2>
+    <div class="grid">
+      <div class="qr"><img src="/pair/setup-qr.svg" alt="QR-код: сертификат"></div>
+      <div>
+        <p>Отсканируйте камерой телефона: откроется страница с сертификатом ПК и инструкцией (iPhone — профиль,
+          Android-приложению ничего не нужно).</p>
+        <div class="copy"><code id="setup">{{SETUP_URL}}</code><button data-copy="setup">Копировать</button></div>
+        <p class="muted">Отпечаток: <code>{{FP}}</code></p>
+      </div>
+    </div>
+  </section>
+
   <section class="card grid">
     <div class="qr"><img src="/pair/qr.svg" alt="QR-код для подключения"></div>
     <div>
-      <h2>Android и iPhone: веб-клиент</h2>
+      <h2>Шаг 2. Подключение</h2>
       <ol>
         <li>Наведите камеру телефона на QR-код и откройте ссылку.</li>
         <li>Добавьте страницу на главный экран: в Safari «Поделиться → На экран „Домой“», в Chrome «⋮ → Добавить на главный экран».</li>
-        <li>Всё, что копируется на ПК, появляется на странице; по кнопке «Отправить» текст или фото уходит в буфер ПК.</li>
       </ol>
       <div class="copy"><code id="pair">{{PAIR_URL}}</code><button data-copy="pair">Копировать</button></div>
     </div>

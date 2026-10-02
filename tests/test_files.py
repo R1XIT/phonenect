@@ -3,6 +3,8 @@ import asyncio
 import io
 import os
 import socket
+import tempfile
+from pathlib import Path
 from urllib.parse import quote
 
 import pytest
@@ -14,6 +16,9 @@ from phonenect import config
 from phonenect.hub import Hub
 from phonenect.peers import Peers
 from phonenect.server import create_app
+from tls import make_certs
+
+CERTS, FP = make_certs(Path(tempfile.mkdtemp()))
 
 H = {"Authorization": "Bearer tok", "X-Device": "iPhone"}
 
@@ -28,7 +33,7 @@ def api(tmp_path):
             hub.paused = True
             hub.loop = asyncio.get_running_loop()
             cfg = {"token": "tok", "port": 1}
-            async with TestClient(TestServer(create_app(hub, cfg, "http://x", Peers(hub, cfg)))) as client:
+            async with TestClient(TestServer(create_app(hub, cfg, "https://x", Peers(hub, cfg), CERTS, FP))) as client:
                 await scenario(client, hub)
 
         asyncio.run(main())
@@ -156,7 +161,7 @@ def test_pc_name_cannot_break_out_of_pages(tmp_path):
     async def main():
         cfg = {"token": "tok", "port": 1, "name": "</script><b>x"}
         hub = Hub(tmp_path, cfg["name"], "id")
-        async with TestClient(TestServer(create_app(hub, cfg, "http://x", Peers(hub, cfg)))) as client:
+        async with TestClient(TestServer(create_app(hub, cfg, "https://x", Peers(hub, cfg), CERTS, FP))) as client:
             page = await (await client.get("/", headers=H)).text()
             assert "</script><b>" not in page and "u003c/script>" in page
             pair = await (await client.get("/pair")).text()
@@ -169,7 +174,7 @@ def run_local(tmp_path, scenario):
     async def main():
         cfg = {"token": "tok", "port": 1}
         hub = Hub(tmp_path, "ПК-тест", config.pc_id("tok"))
-        async with TestClient(TestServer(create_app(hub, cfg, "http://x", Peers(hub, cfg)))) as client:
+        async with TestClient(TestServer(create_app(hub, cfg, "https://x", Peers(hub, cfg), CERTS, FP))) as client:
             await scenario(client)
 
     asyncio.run(main())
@@ -216,6 +221,6 @@ def test_web_client_offers_this_pcs_own_mdns_name(tmp_path):
 
     async def scenario(client):
         page = await (await client.get("/", headers=H)).text()
-        assert f'"http://phonenect-{config.pc_id("tok")}.local:1/api/clip?t=tok"' in page
+        assert f'"https://phonenect-{config.pc_id("tok")}.local:1/api/clip?t=tok&fp={FP}"' in page
 
     run_local(tmp_path, scenario)

@@ -1,6 +1,7 @@
 """HTTP API + WebSocket + веб-клиент для телефонов."""
 import hmac
 import io
+from collections.abc import Callable
 from html import escape
 import json
 from pathlib import Path
@@ -10,14 +11,14 @@ import qrcode
 import qrcode.image.svg
 from aiohttp import WSMsgType, web
 
-from . import config
+from . import certs, config
 from .hub import Hub
 from .peers import LinkError, Peers
 
 WEB_DIR = Path(__file__).parent / "web"
 COOKIE = "pn_token"
 LOCAL_PREFIX = "/pair"  # страница подключения и управление связями с ПК — только с самого ПК
-PUBLIC = {"/manifest.webmanifest", "/icon.svg"}
+PUBLIC = {"/manifest.webmanifest", "/icon.svg", "/ca.crt"}
 MAX_BODY = 50 * 1024 * 1024
 SHORTCUT_NAMES = {
     "to-pc": "На ПК",
@@ -52,9 +53,46 @@ def attachment(name: str) -> str:
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name)}"
 
 
-def create_app(hub: Hub, cfg: dict, base_url: str, peers: Peers) -> web.Application:
+async def shortcut_handler(request):
+    # Подписанные команды без секретов внутри — отдаём без токена.
+    slug = request.match_info["slug"]
+    path = WEB_DIR / "shortcuts" / f"{slug}.shortcut"
+    if slug not in SHORTCUT_NAMES or not path.exists():
+        raise web.HTTPNotFound()
+    filename = quote(f"{SHORTCUT_NAMES[slug]}.shortcut")
+    return web.FileResponse(
+        path,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": f"attachment; filename=\"{slug}.shortcut\"; filename*=UTF-8''{filename}",
+        },
+    )
+
+async def apk_handler(request):
+    # Приложение без секретов внутри — адрес и токен оно получает по ссылке phonenect://pair.
+    path = WEB_DIR / "android" / "phonenect.apk"
+    if not path.exists():
+        raise web.HTTPNotFound(text="Приложение ещё не собрано")
+    return web.FileResponse(
+        path,
+        headers={
+            "Content-Type": "application/vnd.android.package-archive",
+            "Content-Disposition": 'attachment; filename="phonenect.apk"',
+        },
+    )
+
+
+def fingerprint_text(fp: str) -> str:
+    """Отпечаток для глаз: группы по 4 символа."""
+    return " ".join(fp[i:i + 4] for i in range(0, len(fp), 4)).upper()
+
+
+def create_app(
+    hub: Hub, cfg: dict, base_url: Callable[[], str] | str, peers: Peers, cert_dir: Path, fp: str
+) -> web.Application:
     token = cfg["token"]
     name = config.pc_name(cfg)
+    base = base_url if callable(base_url) else (lambda: base_url)  # IP может смениться на ходу
 
     def authorized(request: web.Request) -> bool:
         given = (
@@ -100,8 +138,8 @@ def create_app(hub: Hub, cfg: dict, base_url: str, peers: Peers) -> web.Applicat
             return resp
         # Адрес API — тот, по которому телефон нас реально видит (для «Быстрых команд»).
         html = (WEB_DIR / "index.html").read_text("utf-8")
-        html = html.replace("{{API_URL}}", f"http://{request.host}/api/clip?t={token}")
-        html = html.replace("{{MDNS_URL}}", f"http://{config.mdns_host(token)}:{cfg['port']}/api/clip?t={token}")
+        html = html.replace("{{API_URL}}", f"https://{request.host}/api/clip?t={token}&fp={fp}")
+        html = html.replace("{{MDNS_URL}}", f"https://{config.mdns_host(token)}:{cfg['port']}/api/clip?t={token}&fp={fp}")
         # Имя сети попадает в JS-строку — экранируем как JSON (и «<», чтобы не закрыть </script>).
         html = html.replace('"{{NAME}}"', json.dumps(name).replace("<", "\\u003c"))
         html = html.replace('"{{WIFI}}"', json.dumps(config.wifi_ssid() or "").replace("<", "\\u003c"))
@@ -219,12 +257,18 @@ def create_app(hub: Hub, cfg: dict, base_url: str, peers: Peers) -> web.Applicat
         return ws
 
     def pair_url() -> str:
-        return f"{base_url}/?t={token}&name={quote(name)}"
+        return f"{base()}/?t={token}&name={quote(name)}&fp={fp}"
+
+    def setup_url() -> str:
+        host = urlsplit(base()).hostname
+        return f"http://{host}:{cfg.get('setup_port', config.DEFAULT_SETUP_PORT)}/"
 
     async def pair(request):
         html = (WEB_DIR / "pair.html").read_text("utf-8")
         html = html.replace("{{PAIR_URL}}", pair_url())
-        html = html.replace("{{API_URL}}", f"{base_url}/api/clip?t={token}")
+        html = html.replace("{{API_URL}}", f"{base()}/api/clip?t={token}&fp={fp}")
+        html = html.replace("{{SETUP_URL}}", setup_url())
+        html = html.replace("{{FP}}", fingerprint_text(fp))
         html = html.replace("{{NAME}}", escape(name))
         return web.Response(text=html, content_type="text/html")
 
@@ -250,39 +294,20 @@ def create_app(hub: Hub, cfg: dict, base_url: str, peers: Peers) -> web.Applicat
         await peers.unlink(request.match_info["id"])
         return web.json_response(peers.status())
 
-    async def pair_qr(request):
-        img = qrcode.make(pair_url(), image_factory=qrcode.image.svg.SvgPathImage, box_size=12)
+    def qr_svg(text: str) -> web.Response:
+        img = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage, box_size=12)
         buf = io.BytesIO()
         img.save(buf)
         return web.Response(body=buf.getvalue(), content_type="image/svg+xml")
 
-    async def shortcut(request):
-        # Подписанные команды без секретов внутри — отдаём без токена.
-        slug = request.match_info["slug"]
-        path = WEB_DIR / "shortcuts" / f"{slug}.shortcut"
-        if slug not in SHORTCUT_NAMES or not path.exists():
-            raise web.HTTPNotFound()
-        filename = quote(f"{SHORTCUT_NAMES[slug]}.shortcut")
-        return web.FileResponse(
-            path,
-            headers={
-                "Content-Type": "application/octet-stream",
-                "Content-Disposition": f"attachment; filename=\"{slug}.shortcut\"; filename*=UTF-8''{filename}",
-            },
-        )
+    async def pair_qr(request):
+        return qr_svg(pair_url())
 
-    async def apk(request):
-        # Приложение без секретов внутри — адрес и токен оно получает по ссылке phonenect://pair.
-        path = WEB_DIR / "android" / "phonenect.apk"
-        if not path.exists():
-            raise web.HTTPNotFound(text="Приложение ещё не собрано")
-        return web.FileResponse(
-            path,
-            headers={
-                "Content-Type": "application/vnd.android.package-archive",
-                "Content-Disposition": 'attachment; filename="phonenect.apk"',
-            },
-        )
+    async def setup_qr(request):
+        return qr_svg(setup_url())
+
+    async def ca_crt(request):
+        return web.Response(body=certs.ca_pem(cert_dir), content_type="application/x-x509-ca-cert")
 
     async def static(request):
         return web.FileResponse(WEB_DIR / request.path.lstrip("/"))
@@ -302,10 +327,46 @@ def create_app(hub: Hub, cfg: dict, base_url: str, peers: Peers) -> web.Applicat
             web.get("/ws", websocket),
             web.get("/pair", pair),
             web.get("/pair/qr.svg", pair_qr),
-            web.get("/shortcuts/{slug}.shortcut", shortcut),
-            web.get("/android/phonenect.apk", apk),
+            web.get("/pair/setup-qr.svg", setup_qr),
+            web.get("/ca.crt", ca_crt),
+            web.get("/shortcuts/{slug}.shortcut", shortcut_handler),
+            web.get("/android/phonenect.apk", apk_handler),
             web.get("/manifest.webmanifest", static),
             web.get("/icon.svg", static),
         ]
     )
+    return app
+
+
+def create_setup_app(cfg: dict, cert_dir: Path, fp: str, base_url: Callable[[], str] | str) -> web.Application:
+    """HTTP-порт без секретов: сертификат, профиль iOS, приложение, команды. Токен здесь не нужен и не принимается."""
+    name = config.pc_name(cfg)
+    base = base_url if callable(base_url) else (lambda: base_url)
+
+    async def page(request):
+        html = (WEB_DIR / "setup.html").read_text("utf-8")
+        html = html.replace("{{NAME}}", escape(name)).replace("{{FP}}", fingerprint_text(fp))
+        html = html.replace("{{HTTPS_URL}}", escape(base()))
+        return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-cache"})
+
+    async def ca_crt(request):
+        return web.Response(body=certs.ca_pem(cert_dir), content_type="application/x-x509-ca-cert",
+                            headers={"Content-Disposition": 'attachment; filename="phonenect-ca.crt"'})
+
+    async def profile(request):
+        return web.Response(body=certs.mobileconfig(cert_dir, name), content_type="application/x-apple-aspen-config",
+                            headers={"Content-Disposition": 'attachment; filename="phonenect.mobileconfig"'})
+
+    async def icon(request):
+        return web.FileResponse(WEB_DIR / "icon.svg")
+
+    app = web.Application()
+    app.add_routes([
+        web.get("/", page),
+        web.get("/ca.crt", ca_crt),
+        web.get("/ca.mobileconfig", profile),
+        web.get("/android/phonenect.apk", apk_handler),
+        web.get("/shortcuts/{slug}.shortcut", shortcut_handler),
+        web.get("/icon.svg", icon),
+    ])
     return app

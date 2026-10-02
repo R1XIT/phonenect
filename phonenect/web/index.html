@@ -397,7 +397,7 @@ $("android-pair").onclick = () => {
   // а смену IP приложение переживает само через поиск по mDNS.
   const api = new URL("{{API_URL}}");
   location.href = `phonenect://pair?url=${encodeURIComponent(api.origin)}&t=${encodeURIComponent(api.searchParams.get("t"))}` +
-    `&name=${encodeURIComponent(PC_NAME)}`;
+    `&name=${encodeURIComponent(PC_NAME)}&fp=${encodeURIComponent(api.searchParams.get("fp"))}`;
 };
 // Показываем раздел только своей платформе.
 $("android").hidden = device !== "Android";

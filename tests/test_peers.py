@@ -1,5 +1,7 @@
 """Связь двух ПК: два настоящих сервера Phonenect в одном процессе, буфер Windows не трогаем."""
 import asyncio
+import tempfile
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestServer
@@ -9,6 +11,9 @@ from phonenect.hub import Hub
 from phonenect import peers as peers_module
 from phonenect.peers import LinkError, Peers
 from phonenect.server import create_app
+from tls import make_certs
+
+CERTS, FP = make_certs(Path(tempfile.mkdtemp()))
 
 
 async def nowhere(pc_id):
@@ -31,7 +36,7 @@ class Pc:
     async def start(self):
         self.hub.loop = asyncio.get_running_loop()
         self.peers.start()
-        self.server = TestServer(create_app(self.hub, self.cfg, "http://x", self.peers))
+        self.server = TestServer(create_app(self.hub, self.cfg, "https://x", self.peers, CERTS, FP))
         await self.server.start_server()
         Pc.started.append(self)
 
@@ -290,7 +295,7 @@ def test_link_follows_pc_to_new_address(run, monkeypatch):
         for ws in list(b.hub.sockets):  # соединения рвутся, как при выключении ПК
             await ws.close()
         await b.server.close()
-        b.server = TestServer(create_app(b.hub, b.cfg, "http://x", b.peers))
+        b.server = TestServer(create_app(b.hub, b.cfg, "https://x", b.peers, CERTS, FP))
         await b.server.start_server()
         moved_to = (b.server.host, b.server.port)
         asked = []
