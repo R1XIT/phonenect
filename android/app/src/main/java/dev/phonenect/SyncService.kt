@@ -161,6 +161,10 @@ class SyncService : Service() {
         val current = pc
         if (current == null || current.needsRepair) {
             updateStatus(getString(R.string.status_repair))
+            if (intent?.action == ACTION_SEND_FILES || intent?.action == ACTION_SEND_TEXT) {
+                // Не молчим: отправка пользователя иначе пропала бы без следа.
+                uploadStatus(getString(R.string.upload_failed), getString(R.string.status_repair), ongoing = false)
+            }
             return START_STICKY  // не подключаемся без шифрования; экран подскажет, что делать
         }
         if (client == null) client = Tls.pinnedClient(http, current.ca)

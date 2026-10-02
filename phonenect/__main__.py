@@ -1,6 +1,7 @@
 """Точка входа: сервер в фоне, слежение за буфером, иконка в трее."""
 import argparse
 import asyncio
+import concurrent.futures
 import os
 import ssl
 import sys
@@ -27,24 +28,51 @@ class TlsKeeper:
         self.ca = certs.ensure_ca(cert_dir, config.pc_name(cfg))
         self.fp = certs.fingerprint(self.ca)
         self._ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        self._loaded = False
+        self._lock = threading.Lock()
+        self._dirty = True  # в контексте ещё нет (актуального) сертификата
+        self.loop: asyncio.AbstractEventLoop | None = None  # цикл сервера: перечитываем сертификат на нём
 
     def context(self) -> ssl.SSLContext:
         return self._ctx
 
+    def _load(self) -> None:
+        self._ctx.load_cert_chain(*certs.server_files(self.dir))  # действует для новых соединений
+
+    def _reload(self) -> None:
+        loop = self.loop
+        if loop is None or not loop.is_running():
+            self._load()
+            return
+        # Не во время рукопожатия: контекст читает поток сервера, поэтому меняем его на нём же.
+        done: concurrent.futures.Future = concurrent.futures.Future()
+
+        def work() -> None:
+            try:
+                self._load()
+                done.set_result(None)
+            except BaseException as e:
+                done.set_exception(e)
+
+        loop.call_soon_threadsafe(work)
+        done.result(timeout=10)
+
     def refresh(self, ip: str) -> bool:
-        new = certs.ensure_server_cert(self.dir, ip, config.pc_id(self.cfg["token"]))
-        if new or not self._loaded:
-            self._ctx.load_cert_chain(*certs.server_files(self.dir))  # действует для новых соединений
-            self._loaded = True
-        return new
+        with self._lock:  # из трея и из фонового потока
+            new = certs.ensure_server_cert(self.dir, ip, config.pc_id(self.cfg["token"]))
+            if new:
+                self._dirty = True  # файлы уже перезаписаны; если загрузка упадёт, повторим в следующий раз
+            if self._dirty:
+                self._reload()
+                self._dirty = False
+            return new
 
 
 def run_server(hub: Hub, cfg: dict, tls: TlsKeeper, ready: threading.Event) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     hub.loop = loop
-    base = lambda: f"https://{config.lan_ip(cfg)}:{cfg['port']}"  # IP может смениться на ходу
+    tls.loop = loop
+    base =lambda: f"https://{config.lan_ip(cfg)}:{cfg['port']}"  # IP может смениться на ходу
     peers = Peers(hub, cfg)
     runner = web.AppRunner(create_app(hub, cfg, base, peers, tls.dir, tls.fp))
     setup_runner = web.AppRunner(create_setup_app(cfg, tls.dir, tls.fp, base, peers))
@@ -126,8 +154,27 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = config.load()
-    tls = TlsKeeper(cfg, config.CONFIG_DIR)
-    tls.refresh(config.lan_ip(cfg))
+    try:
+        tls = TlsKeeper(cfg, config.CONFIG_DIR)
+        tls.refresh(config.lan_ip(cfg))
+    except Exception as e:
+        # Под pythonw консоли нет: без окна запуск провалился бы молча.
+        text = f"Не удалось подготовить сертификат для защищённой связи: {e}"
+        if args.no_tray or args.setup_android:
+            print(text)
+        else:
+            import win32api
+            import win32con
+
+            win32api.MessageBox(0, text, "Phonenect", win32con.MB_ICONERROR)
+        sys.exit(1)
+
+    def current_base() -> str:
+        # IP мог смениться с запуска: адрес считаем в момент использования, сертификат обновляем под него.
+        ip = config.lan_ip(cfg)
+        tls.refresh(ip)
+        return f"https://{ip}:{cfg['port']}"
+
     base_url = f"https://{config.lan_ip(cfg)}:{cfg['port']}"
     # Браузер ПК не знает нашего CA, поэтому страница подключения открывается по HTTP стартового порта
     # (она и так пускает только запросы с самого ПК).
@@ -135,7 +182,7 @@ def main() -> None:
 
     if args.setup_android:
         try:
-            print("Готово:", android_setup.setup(base_url, cfg["token"], config.pc_name(cfg), tls.fp))
+            print("Готово:", android_setup.setup(current_base(), cfg["token"], config.pc_name(cfg), tls.fp))
         except android_setup.SetupError as e:
             print("Ошибка:", e)
             sys.exit(1)
@@ -194,7 +241,7 @@ def main() -> None:
         def work():
             notify = lambda text: icon.notify(text, "Phonenect")
             try:
-                model = android_setup.setup(base_url, cfg["token"], config.pc_name(cfg), tls.fp, log=notify)
+                model = android_setup.setup(current_base(), cfg["token"], config.pc_name(cfg), tls.fp, log=notify)
                 notify(f"{model} настроен: буфер теперь общий автоматически.")
             except android_setup.SetupError as e:
                 notify(str(e))

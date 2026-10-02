@@ -15,11 +15,11 @@ from tls import client_ssl, make_certs, server_ssl
 TOKEN = "tok"
 
 
-def run(tmp_path, scenario):
+def run(tmp_path, scenario, token=TOKEN):
     async def main():
         cert_dir, fp = make_certs(tmp_path / "certs")
-        cfg = {"token": TOKEN, "port": 1, "name": "ДОМ"}
-        hub = Hub(tmp_path, "ДОМ", config.pc_id(TOKEN))
+        cfg = {"token": token, "port": 1, "name": "ДОМ"}
+        hub = Hub(tmp_path, "ДОМ", config.pc_id(token))
         hub.loop = asyncio.get_running_loop()
         base = lambda: "https://127.0.0.1:8765"
         peers = Peers(hub, cfg)
@@ -66,19 +66,43 @@ def test_ca_is_public_on_https_and_matches_fingerprint(tmp_path):
 
 
 def test_setup_port_serves_only_public_files(tmp_path):
+    secret = "token-must-never-leak-7f3a"
+
     async def scenario(http, https, setup, cert_dir, fp):
         for path in ("/", "/ca.crt", "/ca.mobileconfig", "/icon.svg"):
             async with http.get(setup.make_url(path)) as r:
                 assert r.status == 200, path
         async with http.get(setup.make_url("/ca.mobileconfig")) as r:
             assert r.headers["Content-Type"] == "application/x-apple-aspen-config"
-        for path in (f"/api/clip?t={TOKEN}", f"/api/info?t={TOKEN}", "/ws", f"/?t={TOKEN}x"):
+        for path in (f"/api/clip?t={secret}", f"/api/info?t={secret}", f"/ws?t={secret}"):
             async with http.get(setup.make_url(path), allow_redirects=False) as r:
-                body = await r.text()
-                assert TOKEN not in body, path
-                assert r.status in (200, 404), path
-        async with http.post(setup.make_url(f"/api/clip?t={TOKEN}"), data=b"x") as r:
+                assert r.status == 404, path
+                assert secret not in await r.text(), path
+        async with http.get(setup.make_url(f"/?t={secret}x"), allow_redirects=False) as r:
+            assert r.status == 200  # стартовая страница; токена в ней нет
+            assert secret not in await r.text()
+        async with http.post(setup.make_url(f"/api/clip?t={secret}"), data=b"x") as r:
             assert r.status in (404, 405)
+        # Токен не просачивается и на публичные файлы
+        for path in ("/", "/ca.crt", "/ca.mobileconfig"):
+            async with http.get(setup.make_url(path)) as r:
+                assert secret.encode() not in await r.read(), path
+
+    run(tmp_path, scenario, token=secret)
+
+
+def test_token_cookie_is_secure_and_reissued(tmp_path):
+    async def scenario(http, https, setup, cert_dir, fp):
+        async with http.get(https.make_url(f"/?t={TOKEN}"), allow_redirects=False,
+                            ssl=client_ssl(cert_dir)) as r:
+            cookie = r.headers["Set-Cookie"]
+            assert "Secure" in cookie and "HttpOnly" in cookie
+        # Старая cookie без Secure (от прошлой версии по http) заменяется при обычном заходе
+        async with http.get(https.make_url("/"), headers={"Cookie": f"pn_token={TOKEN}"},
+                            ssl=client_ssl(cert_dir)) as r:
+            assert r.status == 200
+            cookie = r.headers["Set-Cookie"]
+            assert "Secure" in cookie and "HttpOnly" in cookie
 
     run(tmp_path, scenario)
 

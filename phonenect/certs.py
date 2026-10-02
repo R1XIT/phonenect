@@ -87,7 +87,10 @@ def ensure_ca(d: Path, name: str) -> x509.Certificate:
 def _names(ip: str, pc_id: str) -> list[x509.GeneralName]:
     names: list[x509.GeneralName] = [x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
     if ip != "127.0.0.1":
-        names.append(x509.IPAddress(ipaddress.ip_address(ip)))
+        try:
+            names.append(x509.IPAddress(ipaddress.ip_address(ip)))
+        except ValueError:  # "host" в config.json задан именем, а не IP
+            names.append(x509.DNSName(ip))
     names += [x509.DNSName(n) for n in ("localhost", f"phonenect-{pc_id}.local", "phonenect.local")]
     return names
 
@@ -118,11 +121,11 @@ def _current_is_fine(d: Path, ip: str) -> bool:
         return False
 
     try:
-        ips = {str(v) for v in leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-               .get_values_for_type(x509.IPAddress)}
+        san = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        have = {str(v) for v in san.get_values_for_type(x509.IPAddress)} | set(san.get_values_for_type(x509.DNSName))
     except x509.ExtensionNotFound:
         return False
-    return ip in ips and leaf.not_valid_after_utc - now() > RENEW_BEFORE
+    return ip in have and leaf.not_valid_after_utc - now() > RENEW_BEFORE
 
 
 def ensure_server_cert(d: Path, ip: str, pc_id: str) -> bool:

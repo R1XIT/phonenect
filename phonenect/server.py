@@ -212,11 +212,16 @@ def create_app(
         # В заголовке имя в %-кодировке: кириллицу заголовки не пропускают.
         return (request.query.get("from") or unquote(request.headers.get("X-Device", "")) or "Телефон")[:40]
 
+    def set_token_cookie(resp: web.StreamResponse) -> None:
+        # Secure: cookie привязана к хосту, а не к порту, и без этого флага телефон отправил бы токен
+        # открытым текстом на http-порт того же адреса.
+        resp.set_cookie(COOKIE, token, max_age=10 * 365 * 24 * 3600, httponly=True, samesite="Lax", secure=True)
+
     async def index(request: web.Request):
         if "t" in request.query:
             # Запоминаем токен в cookie и убираем его из адресной строки.
             resp = web.Response(status=302, headers={"Location": "/"})
-            resp.set_cookie(COOKIE, token, max_age=10 * 365 * 24 * 3600, httponly=True, samesite="Lax")
+            set_token_cookie(resp)
             return resp
         # Адрес API — тот, по которому телефон нас реально видит (для «Быстрых команд»).
         html = (WEB_DIR / "index.html").read_text("utf-8")
@@ -225,7 +230,10 @@ def create_app(
         # Имя сети попадает в JS-строку — экранируем как JSON (и «<», чтобы не закрыть </script>).
         html = html.replace('"{{NAME}}"', json.dumps(name).replace("<", "\\u003c"))
         html = html.replace('"{{WIFI}}"', json.dumps(config.wifi_ssid() or "").replace("<", "\\u003c"))
-        return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-cache"})
+        resp = web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-cache"})
+        if request.cookies.get(COOKIE):
+            set_token_cookie(resp)  # заменяет старую cookie без Secure (от прошлой версии по http)
+        return resp
 
     def raw(clip):
         if clip is None:

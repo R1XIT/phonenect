@@ -47,6 +47,13 @@ def test_server_cert_is_kept_while_valid_and_reissued_for_new_ip(tmp_path):
     assert "10.0.0.7" in san(load_server(tmp_path)[0])
 
 
+def test_hostname_instead_of_ip_goes_into_san_as_dns_name(tmp_path):
+    certs.ensure_ca(tmp_path, "ДОМ")
+    assert certs.ensure_server_cert(tmp_path, "my-pc.lan", ID) is True
+    assert "my-pc.lan" in san(load_server(tmp_path)[0])
+    assert certs.ensure_server_cert(tmp_path, "my-pc.lan", ID) is False  # не перевыпускается каждую минуту
+
+
 def test_server_cert_is_renewed_before_expiry(tmp_path, monkeypatch):
     certs.ensure_ca(tmp_path, "ДОМ")
     certs.ensure_server_cert(tmp_path, "192.168.0.25", ID)
