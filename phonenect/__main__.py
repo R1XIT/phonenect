@@ -2,30 +2,57 @@
 import argparse
 import asyncio
 import os
+import ssl
 import sys
 import threading
+from pathlib import Path
 import webbrowser
 import winreg
 
 from aiohttp import web
 from PIL import Image, ImageDraw
 
-from . import android_setup, config
+from . import android_setup, certs, config
 from .hub import Hub
 from .mdns import Advertiser
 from .peers import Peers
-from .server import create_app
+from .server import create_app, create_setup_app
 
 
-def run_server(hub: Hub, cfg: dict, base_url: str, ready: threading.Event) -> None:
+class TlsKeeper:
+    """Держит TLS-контекст сервера и перевыпускает сертификат, когда меняется IP."""
+
+    def __init__(self, cfg: dict, cert_dir: Path) -> None:
+        self.cfg, self.dir = cfg, cert_dir
+        self.ca = certs.ensure_ca(cert_dir, config.pc_name(cfg))
+        self.fp = certs.fingerprint(self.ca)
+        self._ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        self._loaded = False
+
+    def context(self) -> ssl.SSLContext:
+        return self._ctx
+
+    def refresh(self, ip: str) -> bool:
+        new = certs.ensure_server_cert(self.dir, ip, config.pc_id(self.cfg["token"]))
+        if new or not self._loaded:
+            self._ctx.load_cert_chain(*certs.server_files(self.dir))  # действует для новых соединений
+            self._loaded = True
+        return new
+
+
+def run_server(hub: Hub, cfg: dict, tls: TlsKeeper, ready: threading.Event) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     hub.loop = loop
+    base = lambda: f"https://{config.lan_ip(cfg)}:{cfg['port']}"  # IP может смениться на ходу
     peers = Peers(hub, cfg)
-    runner = web.AppRunner(create_app(hub, cfg, base_url, peers))
+    runner = web.AppRunner(create_app(hub, cfg, base, peers, tls.dir, tls.fp))
+    setup_runner = web.AppRunner(create_setup_app(cfg, tls.dir, tls.fp, base, peers))
     loop.run_until_complete(runner.setup())
+    loop.run_until_complete(setup_runner.setup())
     try:
-        loop.run_until_complete(web.TCPSite(runner, "0.0.0.0", cfg["port"]).start())
+        loop.run_until_complete(web.TCPSite(runner, "0.0.0.0", cfg["port"], ssl_context=tls.context()).start())
+        loop.run_until_complete(web.TCPSite(setup_runner, "0.0.0.0", cfg["setup_port"]).start())
     except OSError as e:
         # Порт занят — скорее всего, Phonenect уже запущен.
         hub.error = e
@@ -99,12 +126,16 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = config.load()
-    base_url = f"http://{config.lan_ip(cfg)}:{cfg['port']}"
-    local_pair = f"http://127.0.0.1:{cfg['port']}/pair"
+    tls = TlsKeeper(cfg, config.CONFIG_DIR)
+    tls.refresh(config.lan_ip(cfg))
+    base_url = f"https://{config.lan_ip(cfg)}:{cfg['port']}"
+    # Браузер ПК не знает нашего CA, поэтому страница подключения открывается по HTTP стартового порта
+    # (она и так пускает только запросы с самого ПК).
+    local_pair = f"http://127.0.0.1:{cfg['setup_port']}/pair"
 
     if args.setup_android:
         try:
-            print("Готово:", android_setup.setup(base_url, cfg["token"], config.pc_name(cfg)))
+            print("Готово:", android_setup.setup(base_url, cfg["token"], config.pc_name(cfg), tls.fp))
         except android_setup.SetupError as e:
             print("Ошибка:", e)
             sys.exit(1)
@@ -113,7 +144,7 @@ def main() -> None:
     files_dir = config.files_dir(cfg)
     hub = Hub(files_dir, config.pc_name(cfg), config.pc_id(cfg["token"]))
     ready = threading.Event()
-    threading.Thread(target=run_server, args=(hub, cfg, base_url, ready), daemon=True).start()
+    threading.Thread(target=run_server, args=(hub, cfg, tls, ready), daemon=True).start()
     ready.wait()
     if getattr(hub, "error", None):
         print(f"Не удалось занять порт {cfg['port']}: {hub.error}. Phonenect уже запущен?")
@@ -122,7 +153,20 @@ def main() -> None:
     mdns = Advertiser(cfg)
     threading.Thread(target=mdns.run, daemon=True).start()
 
+    stop_tls = threading.Event()
+
+    def keep_tls_fresh() -> None:
+        # Раз в минуту: сменился IP — выпускаем сертификат под новый адрес.
+        while not stop_tls.wait(60):
+            try:
+                tls.refresh(config.lan_ip(cfg))
+            except Exception as e:
+                print("Не удалось обновить сертификат:", e)
+
+    threading.Thread(target=keep_tls_fresh, daemon=True).start()
+
     print(f"Phonenect запущен: {base_url}")
+    print(f"Отпечаток сертификата: {tls.fp}")
     print(f"Подключить телефон (QR): {local_pair}")
 
     if args.no_tray:
@@ -150,7 +194,7 @@ def main() -> None:
         def work():
             notify = lambda text: icon.notify(text, "Phonenect")
             try:
-                model = android_setup.setup(base_url, cfg["token"], config.pc_name(cfg), log=notify)
+                model = android_setup.setup(base_url, cfg["token"], config.pc_name(cfg), tls.fp, log=notify)
                 notify(f"{model} настроен: буфер теперь общий автоматически.")
             except android_setup.SetupError as e:
                 notify(str(e))
@@ -162,6 +206,7 @@ def main() -> None:
     def quit_app(icon, item):
         hub.stop()
         mdns.stop()
+        stop_tls.set()
         icon.stop()
 
     icon = pystray.Icon(

@@ -22,10 +22,11 @@ def run(tmp_path, scenario):
         hub = Hub(tmp_path, "ДОМ", config.pc_id(TOKEN))
         hub.loop = asyncio.get_running_loop()
         base = lambda: "https://127.0.0.1:8765"
-        app = create_app(hub, cfg, base, Peers(hub, cfg), cert_dir, fp)
+        peers = Peers(hub, cfg)
+        app = create_app(hub, cfg, base, peers, cert_dir, fp)
         https = TestServer(app)
         await https.start_server(ssl=server_ssl(cert_dir))
-        setup = TestServer(create_setup_app(cfg, cert_dir, fp, base))
+        setup = TestServer(create_setup_app(cfg, cert_dir, fp, base, peers))
         await setup.start_server()
         async with aiohttp.ClientSession() as http:
             try:
@@ -71,13 +72,23 @@ def test_setup_port_serves_only_public_files(tmp_path):
                 assert r.status == 200, path
         async with http.get(setup.make_url("/ca.mobileconfig")) as r:
             assert r.headers["Content-Type"] == "application/x-apple-aspen-config"
-        for path in (f"/api/clip?t={TOKEN}", f"/api/info?t={TOKEN}", "/ws", "/pair", f"/?t={TOKEN}x"):
+        for path in (f"/api/clip?t={TOKEN}", f"/api/info?t={TOKEN}", "/ws", f"/?t={TOKEN}x"):
             async with http.get(setup.make_url(path), allow_redirects=False) as r:
                 body = await r.text()
                 assert TOKEN not in body, path
                 assert r.status in (200, 404), path
         async with http.post(setup.make_url(f"/api/clip?t={TOKEN}"), data=b"x") as r:
             assert r.status in (404, 405)
+
+    run(tmp_path, scenario)
+
+
+def test_pair_page_opens_locally_over_setup_port_but_not_remotely(tmp_path):
+    async def scenario(http, https, setup, cert_dir, fp):
+        async with http.get(setup.make_url("/pair")) as r:
+            assert r.status == 200  # с 127.0.0.1 — можно
+        async with http.get(setup.make_url("/pair"), headers={"Host": "evil.example"}) as r:
+            assert r.status == 403
 
     run(tmp_path, scenario)
 

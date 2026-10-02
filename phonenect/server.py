@@ -87,6 +87,96 @@ def fingerprint_text(fp: str) -> str:
     return " ".join(fp[i:i + 4] for i in range(0, len(fp), 4)).upper()
 
 
+def is_local_path(path: str) -> bool:
+    return path == LOCAL_PREFIX or path.startswith(LOCAL_PREFIX + "/")
+
+
+def check_local(request: web.Request) -> None:
+    """Страницы /pair — только с самого ПК и только со своей страницы."""
+    if request.remote not in ("127.0.0.1", "::1"):
+        raise web.HTTPForbidden(text="Страница доступна только на самом ПК")
+    # Браузер на этом ПК могут натравить и чужие сайты: DNS rebinding (чужое имя на 127.0.0.1)
+    # и запросы с других страниц. Пускаем только свои адрес и страницу.
+    if not is_local_host(request.host) or not is_local_origin(request.headers.get("Origin")):
+        raise web.HTTPForbidden(text="Запрос не со страницы Phonenect")
+    if request.method == "POST" and request.content_type != "application/json":
+        # С application/json браузер сначала спрашивает разрешения (preflight), а его мы не даём.
+        raise web.HTTPUnsupportedMediaType(text="Нужен application/json")
+
+
+@web.middleware
+async def local_pages(request: web.Request, handler):
+    if is_local_path(request.path):
+        check_local(request)
+    return await handler(request)
+
+
+def qr_svg(text: str) -> web.Response:
+    img = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage, box_size=12)
+    buf = io.BytesIO()
+    img.save(buf)
+    return web.Response(body=buf.getvalue(), content_type="image/svg+xml")
+
+
+def pair_routes(cfg: dict, base: Callable[[], str], peers: Peers, fp: str) -> list[web.RouteDef]:
+    """Страница подключения и связи с другими ПК: открывается только на самом ПК (см. check_local)."""
+    token = cfg["token"]
+    name = config.pc_name(cfg)
+
+    def pair_url() -> str:
+        return f"{base()}/?t={token}&name={quote(name)}&fp={fp}"
+
+    def setup_url() -> str:
+        host = urlsplit(base()).hostname
+        return f"http://{host}:{cfg.get('setup_port', config.DEFAULT_SETUP_PORT)}/"
+
+    async def pair(request):
+        html = (WEB_DIR / "pair.html").read_text("utf-8")
+        html = html.replace("{{PAIR_URL}}", pair_url())
+        html = html.replace("{{API_URL}}", f"{base()}/api/clip?t={token}&fp={fp}")
+        html = html.replace("{{SETUP_URL}}", setup_url())
+        html = html.replace("{{FP}}", fingerprint_text(fp))
+        html = html.replace("{{NAME}}", escape(name))
+        return web.Response(text=html, content_type="text/html")
+
+    async def peers_list(request):
+        return web.json_response(peers.status())
+
+    async def peers_add(request):
+        try:
+            body = await request.json()
+            link = body.get("link") if isinstance(body, dict) else None
+        except ValueError:
+            link = None
+        if not isinstance(link, str):
+            raise web.HTTPBadRequest(text="Нужен адрес другого ПК")
+        try:
+            await peers.add(link)
+        except LinkError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        return web.json_response(peers.status())
+
+    async def peers_remove(request):
+        # По id, а не по номеру в списке: список на странице мог устареть.
+        await peers.unlink(request.match_info["id"])
+        return web.json_response(peers.status())
+
+    async def pair_qr(request):
+        return qr_svg(pair_url())
+
+    async def setup_qr(request):
+        return qr_svg(setup_url())
+
+    return [
+        web.get("/pair/peers", peers_list),
+        web.post("/pair/peers", peers_add),
+        web.delete("/pair/peers/{id}", peers_remove),
+        web.get("/pair", pair),
+        web.get("/pair/qr.svg", pair_qr),
+        web.get("/pair/setup-qr.svg", setup_qr),
+    ]
+
+
 def create_app(
     hub: Hub, cfg: dict, base_url: Callable[[], str] | str, peers: Peers, cert_dir: Path, fp: str
 ) -> web.Application:
@@ -105,16 +195,8 @@ def create_app(
 
     @web.middleware
     async def auth(request: web.Request, handler):
-        if request.path == LOCAL_PREFIX or request.path.startswith(LOCAL_PREFIX + "/"):
-            if request.remote not in ("127.0.0.1", "::1"):
-                raise web.HTTPForbidden(text="Страница доступна только на самом ПК")
-            # Браузер на этом ПК могут натравить и чужие сайты: DNS rebinding (чужое имя на 127.0.0.1)
-            # и запросы с других страниц. Пускаем только свои адрес и страницу.
-            if not is_local_host(request.host) or not is_local_origin(request.headers.get("Origin")):
-                raise web.HTTPForbidden(text="Запрос не со страницы Phonenect")
-            if request.method == "POST" and request.content_type != "application/json":
-                # С application/json браузер сначала спрашивает разрешения (preflight), а его мы не даём.
-                raise web.HTTPUnsupportedMediaType(text="Нужен application/json")
+        if is_local_path(request.path):
+            check_local(request)
         elif (
             request.path not in PUBLIC
             and not request.path.startswith("/shortcuts/")
@@ -256,56 +338,6 @@ def create_app(
                 peers.disconnected_in(origin, ws)
         return ws
 
-    def pair_url() -> str:
-        return f"{base()}/?t={token}&name={quote(name)}&fp={fp}"
-
-    def setup_url() -> str:
-        host = urlsplit(base()).hostname
-        return f"http://{host}:{cfg.get('setup_port', config.DEFAULT_SETUP_PORT)}/"
-
-    async def pair(request):
-        html = (WEB_DIR / "pair.html").read_text("utf-8")
-        html = html.replace("{{PAIR_URL}}", pair_url())
-        html = html.replace("{{API_URL}}", f"{base()}/api/clip?t={token}&fp={fp}")
-        html = html.replace("{{SETUP_URL}}", setup_url())
-        html = html.replace("{{FP}}", fingerprint_text(fp))
-        html = html.replace("{{NAME}}", escape(name))
-        return web.Response(text=html, content_type="text/html")
-
-    async def peers_list(request):
-        return web.json_response(peers.status())
-
-    async def peers_add(request):
-        try:
-            body = await request.json()
-            link = body.get("link") if isinstance(body, dict) else None
-        except ValueError:
-            link = None
-        if not isinstance(link, str):
-            raise web.HTTPBadRequest(text="Нужен адрес другого ПК")
-        try:
-            await peers.add(link)
-        except LinkError as e:
-            raise web.HTTPBadRequest(text=str(e))
-        return web.json_response(peers.status())
-
-    async def peers_remove(request):
-        # По id, а не по номеру в списке: список на странице мог устареть.
-        await peers.unlink(request.match_info["id"])
-        return web.json_response(peers.status())
-
-    def qr_svg(text: str) -> web.Response:
-        img = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage, box_size=12)
-        buf = io.BytesIO()
-        img.save(buf)
-        return web.Response(body=buf.getvalue(), content_type="image/svg+xml")
-
-    async def pair_qr(request):
-        return qr_svg(pair_url())
-
-    async def setup_qr(request):
-        return qr_svg(setup_url())
-
     async def ca_crt(request):
         return web.Response(body=certs.ca_pem(cert_dir), content_type="application/x-x509-ca-cert")
 
@@ -321,13 +353,8 @@ def create_app(
             web.get("/api/clip/{id:\\d+}", get_clip),
             web.get("/api/history", history),
             web.get("/api/info", info),
-            web.get("/pair/peers", peers_list),
-            web.post("/pair/peers", peers_add),
-            web.delete("/pair/peers/{id}", peers_remove),
             web.get("/ws", websocket),
-            web.get("/pair", pair),
-            web.get("/pair/qr.svg", pair_qr),
-            web.get("/pair/setup-qr.svg", setup_qr),
+            *pair_routes(cfg, base, peers, fp),
             web.get("/ca.crt", ca_crt),
             web.get("/shortcuts/{slug}.shortcut", shortcut_handler),
             web.get("/android/phonenect.apk", apk_handler),
@@ -338,7 +365,9 @@ def create_app(
     return app
 
 
-def create_setup_app(cfg: dict, cert_dir: Path, fp: str, base_url: Callable[[], str] | str) -> web.Application:
+def create_setup_app(
+    cfg: dict, cert_dir: Path, fp: str, base_url: Callable[[], str] | str, peers: Peers | None = None
+) -> web.Application:
     """HTTP-порт без секретов: сертификат, профиль iOS, приложение, команды. Токен здесь не нужен и не принимается."""
     name = config.pc_name(cfg)
     base = base_url if callable(base_url) else (lambda: base_url)
@@ -360,7 +389,10 @@ def create_setup_app(cfg: dict, cert_dir: Path, fp: str, base_url: Callable[[], 
     async def icon(request):
         return web.FileResponse(WEB_DIR / "icon.svg")
 
-    app = web.Application()
+    # С peers отсюда открывается и страница подключения — только с самого ПК: браузер ПК не знает нашего CA.
+    app = web.Application(middlewares=[local_pages] if peers is not None else [])
+    if peers is not None:
+        app.add_routes(pair_routes(cfg, base, peers, fp))
     app.add_routes([
         web.get("/", page),
         web.get("/ca.crt", ca_crt),
