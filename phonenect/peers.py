@@ -7,11 +7,13 @@
 ПК узнаются по id (хеш токена), имя — только для подписи: его можно сменить.
 """
 import asyncio
+import ssl
 from urllib.parse import parse_qs, quote, urlsplit
 
 import aiohttp
+from cryptography import x509
 
-from . import config, mdns
+from . import certs, config, mdns
 from .hub import Clip, Hub
 
 AUTO_LIMIT = 200 * 1024 * 1024  # просто скопированные файлы больше этого между ПК не гоняем
@@ -25,18 +27,45 @@ class LinkError(Exception):
     pass
 
 
-def parse_link(link: str) -> tuple[str, str]:
-    """Адрес другого ПК (http://host:port/api/clip?t=TOKEN) → (база, токен)."""
+FINGERPRINT_MISMATCH = "Сертификат не совпадает — подключайтесь из дома и проверьте отпечаток на странице ПК"
+OLD_LINK = "Старая ссылка — скопируйте адрес на том ПК заново (трей → «Связать с другим ПК…»)"
+
+
+def parse_link(link: str) -> tuple[str, str, str]:
+    """Адрес другого ПК (https://host:port/api/clip?t=TOKEN&fp=…) → (база, токен, отпечаток CA)."""
     parts = urlsplit(link.strip())
-    token = parse_qs(parts.query).get("t", [""])[0]
-    if parts.scheme not in ("http", "https") or not parts.netloc or not token:
-        raise LinkError("Это не адрес Phonenect: нужен адрес вида http://…/api/clip?t=…")
-    return f"{parts.scheme}://{parts.netloc}", token
+    query = parse_qs(parts.query)
+    token, fp = query.get("t", [""])[0], query.get("fp", [""])[0].lower()
+    if not parts.netloc or not token:
+        raise LinkError("Это не адрес Phonenect: нужен адрес вида https://…/api/clip?t=…&fp=…")
+    if parts.scheme != "https" or len(fp) != 64:
+        raise LinkError(OLD_LINK)
+    return f"https://{parts.netloc}", token, fp
 
 
-async def fetch_info(http: aiohttp.ClientSession, url: str, token: str) -> dict:
+async def fetch_ca(http: aiohttp.ClientSession, url: str, fp: str) -> str:
+    """Скачивает CA того ПК и сверяет с отпечатком из ссылки. Единственный запрос без проверки сертификата."""
     try:
-        async with http.get(f"{url}/api/info", headers={"Authorization": f"Bearer {token}"},
+        async with http.get(f"{url}/ca.crt", ssl=False, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            pem = await r.read()
+        cert = x509.load_pem_x509_certificate(pem)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        raise LinkError("Не удалось связаться: ПК включён, в той же сети, брандмауэр пропускает Phonenect?")
+    if certs.fingerprint(cert) != fp:
+        raise LinkError(FINGERPRINT_MISMATCH)
+    return pem.decode()
+
+
+def pinned_ssl(ca_pem: str) -> ssl.SSLContext:
+    """Доверяем только CA того ПК. Имя не проверяем: CA уникален для ПК, а IP меняется."""
+    ctx = ssl.create_default_context(cadata=ca_pem)
+    ctx.check_hostname = False
+    return ctx
+
+
+async def fetch_info(http: aiohttp.ClientSession, url: str, token: str, ssl_ctx: ssl.SSLContext) -> dict:
+    try:
+        async with http.get(f"{url}/api/info", headers={"Authorization": f"Bearer {token}"}, ssl=ssl_ctx,
                             timeout=aiohttp.ClientTimeout(total=5)) as r:
             if r.status == 401:
                 raise LinkError("Неверный токен: скопируйте адрес заново")
@@ -49,7 +78,7 @@ async def fetch_info(http: aiohttp.ClientSession, url: str, token: str) -> dict:
 
 class Peer:
     def __init__(
-        self, hub: Hub, http: aiohttp.ClientSession, me: str, url: str, token: str, name: str,
+        self, hub: Hub, http: aiohttp.ClientSession, me: str, url: str, token: str, name: str, ca: str,
         on_refused=lambda peer: None,
         locate=None,
         on_moved=lambda peer: None,
@@ -59,6 +88,8 @@ class Peer:
         self.on_refused = on_refused  # тот ПК отвязал нас со своей стороны
         self.hub, self.http, self.me = hub, http, me  # me — имя этого ПК для подписи
         self.url, self.token, self.name = url, token, name
+        self.ca = ca  # CA того ПК, сверенный по отпечатку при связывании; другим не доверяем
+        self.ssl = pinned_ssl(ca)
         self.id = config.pc_id(token)
         self.connected = False
         self.tasks: set[asyncio.Task] = set()
@@ -93,10 +124,10 @@ class Peer:
             try:
                 # Представляемся: тот ПК покажет связь у себя и сможет её разорвать.
                 hello = {**self.auth, "X-Origin": self.hub.id, "X-Origin-Name": quote(self.me)}
-                async with self.http.ws_connect(f"{self.url}/ws", headers=hello, heartbeat=25) as ws:
+                async with self.http.ws_connect(f"{self.url}/ws", headers=hello, heartbeat=25, ssl=self.ssl) as ws:
                     failures = 0
                     try:  # тот ПК могли переименовать
-                        self.name = (await fetch_info(self.http, self.url, self.token)).get("name") or self.name
+                        self.name = (await fetch_info(self.http, self.url, self.token, self.ssl)).get("name") or self.name
                     except LinkError:
                         pass
                     self.connected = True
@@ -130,7 +161,7 @@ class Peer:
             found = await self.locate(self.id)
         except Exception:
             return
-        url = found and f"http://{found[0]}:{found[1]}"
+        url = found and f"https://{found[0]}:{found[1]}"
         if url and url != self.url:
             self.url = url
             self.on_moved(self)
@@ -145,7 +176,7 @@ class Peer:
             await self.hub.add_remote(meta["text"].encode(), "text/plain; charset=utf-8", source, origin=self.id)
             return
         if kind == "image":
-            async with self.http.get(f"{self.url}/api/clip/{meta['id']}", headers=self.auth) as r:
+            async with self.http.get(f"{self.url}/api/clip/{meta['id']}", headers=self.auth, ssl=self.ssl) as r:
                 if r.status == 200:
                     await self.hub.add_remote(await r.read(), meta["mime"], source, origin=self.id)
         elif kind == "file" and (meta["size"] <= AUTO_LIMIT or meta.get("explicit")):
@@ -155,7 +186,7 @@ class Peer:
         async with self.downloads:
             try:
                 async with self.http.get(
-                    f"{self.url}/api/clip/{meta['id']}", headers=self.auth, timeout=TRANSFER_TIMEOUT
+                    f"{self.url}/api/clip/{meta['id']}", headers=self.auth, ssl=self.ssl, timeout=TRANSFER_TIMEOUT
                 ) as r:
                     if r.status != 200:
                         return
@@ -190,7 +221,9 @@ class Peer:
         else:
             body = clip.data
         try:
-            async with self.http.post(f"{self.url}/api/clip", data=body, headers=headers, timeout=TRANSFER_TIMEOUT) as r:
+            async with self.http.post(
+                f"{self.url}/api/clip", data=body, headers=headers, ssl=self.ssl, timeout=TRANSFER_TIMEOUT
+            ) as r:
                 if r.status >= 300:
                     print(f"{self.name}: ответ {r.status} на отправку")
         except Exception as e:
@@ -219,16 +252,20 @@ class Peers:
         self.incoming: dict[str, tuple[str, object]] = {}  # id → (имя, WebSocket): кто связался с нами
         self.find = find_on_lan
         self.http: aiohttp.ClientSession | None = None
+        self.stale: list[dict] = []  # старые связи без шифрования: не запускаем, показываем «свяжите заново»
 
     def start(self) -> None:
         """Зовётся в цикле событий хаба."""
         self.http = aiohttp.ClientSession()
         for p in self.cfg.get("peers", []):
-            self._spawn(p["url"], p["token"], p.get("name") or p["url"])
+            if not p.get("ca") or p["url"].startswith("http://"):
+                self.stale.append(p)
+            else:
+                self._spawn(p["url"], p["token"], p.get("name") or p["url"], p["ca"])
 
-    def _spawn(self, url: str, token: str, name: str) -> Peer:
+    def _spawn(self, url: str, token: str, name: str, ca: str) -> Peer:
         peer = Peer(
-            self.hub, self.http, self.me, url, token, name,
+            self.hub, self.http, self.me, url, token, name, ca,
             on_refused=self._refused,
             locate=lambda pc_id: self.find(pc_id),  # через self — чтобы поиск можно было подменить
             on_moved=lambda _: self._save(),
@@ -238,12 +275,15 @@ class Peers:
         return peer
 
     def _save(self) -> None:
-        self.cfg["peers"] = [{"url": p.url, "token": p.token, "name": p.name} for p in self.items]
+        self.cfg["peers"] = [{"url": p.url, "token": p.token, "name": p.name, "ca": p.ca} for p in self.items]
+        self.cfg["peers"] += self.stale
         config.save(self.cfg)
 
     def status(self) -> list[dict]:
-        ours = [{"id": p.id, "name": p.name, "url": p.url, "connected": p.connected, "incoming": False}
-                for p in self.items]
+        ours = [{"id": p.id, "name": p.name, "url": p.url, "connected": p.connected, "incoming": False,
+                 "stale": False} for p in self.items]
+        ours += [{"id": config.pc_id(p["token"]), "name": p.get("name") or p["url"], "url": p["url"],
+                  "connected": False, "incoming": False, "stale": True} for p in self.stale]
         theirs = [{"id": i, "name": name, "url": "", "connected": True, "incoming": True}
                   for i, (name, _) in self.incoming.items() if i not in {p.id for p in self.items}]
         return ours + theirs
@@ -269,6 +309,9 @@ class Peers:
         """Отвязать ПК: свою связь удаляем, чужую запрещаем и рвём."""
         for p in [p for p in self.items if p.id == pc_id]:
             self.remove(p)
+        if any(config.pc_id(s["token"]) == pc_id for s in self.stale):
+            self.stale = [s for s in self.stale if config.pc_id(s["token"]) != pc_id]
+            self._save()
         if pc_id in self.incoming:
             if pc_id not in self.blocked:
                 self.blocked.append(pc_id)
@@ -281,8 +324,9 @@ class Peers:
             self.remove(peer)
 
     async def add(self, link: str) -> Peer:
-        url, token = parse_link(link)
-        info = await fetch_info(self.http, url, token)
+        url, token, fp = parse_link(link)
+        ca = await fetch_ca(self.http, url, fp)
+        info = await fetch_info(self.http, url, token, pinned_ssl(ca))
         if info.get("id") == self.my_id:
             raise LinkError("Это адрес этого же ПК — скопируйте адрес на другом компьютере")
         if self.my_id in info.get("peers", []):
@@ -294,7 +338,8 @@ class Peers:
         for p in list(self.items):
             if p.token == token:  # тот же ПК с новым адресом — заменяем
                 self.remove(p)
-        peer = self._spawn(url, token, info.get("name") or url)
+        self.stale = [s for s in self.stale if s["token"] != token]  # старая связь с тем же ПК заменяется
+        peer = self._spawn(url, token, info.get("name") or url, ca)
         self._save()
         return peer
 

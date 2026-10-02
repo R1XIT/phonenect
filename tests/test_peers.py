@@ -1,7 +1,5 @@
 """Связь двух ПК: два настоящих сервера Phonenect в одном процессе, буфер Windows не трогаем."""
 import asyncio
-import tempfile
-from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestServer
@@ -11,9 +9,7 @@ from phonenect.hub import Hub
 from phonenect import peers as peers_module
 from phonenect.peers import LinkError, Peers
 from phonenect.server import create_app
-from tls import make_certs
-
-CERTS, FP = make_certs(Path(tempfile.mkdtemp()))
+from tls import make_certs, server_ssl
 
 
 async def nowhere(pc_id):
@@ -29,6 +25,7 @@ class Pc:
         self.hub = Hub(tmp_path / key, name, config.pc_id(self.cfg["token"]))
         self.hub.files_dir.mkdir()
         self.hub.paused = True  # не писать в настоящий буфер Windows
+        self.cert_dir, self.fp = make_certs(tmp_path / f"certs-{key}")  # у каждого ПК свой CA
         self.peers = Peers(self.hub, self.cfg)
         self.peers.find = nowhere  # настоящий поиск по mDNS в тестах не нужен и идёт секунды
         self.server: TestServer | None = None
@@ -36,13 +33,13 @@ class Pc:
     async def start(self):
         self.hub.loop = asyncio.get_running_loop()
         self.peers.start()
-        self.server = TestServer(create_app(self.hub, self.cfg, "https://x", self.peers, CERTS, FP))
-        await self.server.start_server()
+        self.server = TestServer(create_app(self.hub, self.cfg, "https://x", self.peers, self.cert_dir, self.fp))
+        await self.server.start_server(ssl=server_ssl(self.cert_dir))
         Pc.started.append(self)
 
     @property
     def link(self) -> str:
-        return str(self.server.make_url(f"/api/clip?t={self.cfg['token']}"))
+        return str(self.server.make_url(f"/api/clip?t={self.cfg['token']}&fp={self.fp}"))
 
     def copy(self, text: str):
         """Как будто на этом ПК скопировали текст."""
@@ -260,7 +257,7 @@ def test_unlinking_on_other_side_ends_link_for_both(run):
     async def scenario(a, b):
         await linked(a, b)
         await until(lambda: b.peers.status())
-        async with b.peers.http.delete(b.server.make_url(f"/pair/peers/{a.hub.id}")) as r:
+        async with b.peers.http.delete(b.server.make_url(f"/pair/peers/{a.hub.id}"), ssl=False) as r:
             assert r.status == 200
         await until(lambda: a.peers.items == [])
         assert b.peers.status() == []
@@ -295,8 +292,8 @@ def test_link_follows_pc_to_new_address(run, monkeypatch):
         for ws in list(b.hub.sockets):  # соединения рвутся, как при выключении ПК
             await ws.close()
         await b.server.close()
-        b.server = TestServer(create_app(b.hub, b.cfg, "https://x", b.peers, CERTS, FP))
-        await b.server.start_server()
+        b.server = TestServer(create_app(b.hub, b.cfg, "https://x", b.peers, b.cert_dir, b.fp))
+        await b.server.start_server(ssl=server_ssl(b.cert_dir))
         moved_to = (b.server.host, b.server.port)
         asked = []
 
@@ -307,7 +304,7 @@ def test_link_follows_pc_to_new_address(run, monkeypatch):
         a.peers.find = find
         await until(lambda: a.peers.items[0].connected and a.peers.items[0].url.endswith(f":{moved_to[1]}"))
         assert asked and set(asked) == {b.hub.id}
-        assert a.cfg["peers"][0]["url"] == f"http://{moved_to[0]}:{moved_to[1]}"
+        assert a.cfg["peers"][0]["url"] == f"https://{moved_to[0]}:{moved_to[1]}"
         b.copy("на новом адресе")
         await until(lambda: ("BETA", "на новом адресе") in a.texts())
 
@@ -351,14 +348,73 @@ def test_wrong_token_is_rejected(run):
     run(scenario)
 
 
+def test_link_with_wrong_fingerprint_is_refused(run):
+    async def scenario(a, b):
+        bad = b.link.replace(b.fp, "0" * 64)
+        with pytest.raises(LinkError, match="Сертификат не совпадает"):
+            await a.peers.add(bad)
+        assert a.peers.items == []
+
+    run(scenario)
+
+
+def test_link_without_fingerprint_is_refused(run):
+    async def scenario(a, b):
+        old = b.link.split("&fp=")[0]
+        with pytest.raises(LinkError, match="Старая ссылка"):
+            await a.peers.add(old)
+
+    run(scenario)
+
+
+def test_link_keeps_trusting_only_saved_ca(run, tmp_path):
+    async def scenario(a, b):
+        await linked(a, b)
+        assert a.cfg["peers"][0]["ca"].startswith("-----BEGIN CERTIFICATE-----")
+        # Тот же адрес теперь отвечает чужим сертификатом — связь не должна подняться.
+        imposter_dir, _ = make_certs(tmp_path / "подмена")
+        old_port = b.server.port
+        for ws in list(b.hub.sockets):
+            await ws.close()
+        await b.server.close()
+        app = create_app(b.hub, b.cfg, "https://x", b.peers, imposter_dir, b.fp)
+        try:
+            b.server = TestServer(app, port=old_port)
+            await b.server.start_server(ssl=server_ssl(imposter_dir))
+        except OSError:  # Windows не сразу освобождает порт: подмена на другом порту, связь указывает на неё
+            b.server = TestServer(app)
+            await b.server.start_server(ssl=server_ssl(imposter_dir))
+            a.peers.items[0].url = f"https://{b.server.host}:{b.server.port}"
+        await asyncio.sleep(1.5)
+        assert not a.peers.items[0].connected
+
+    run(scenario)
+
+
+def test_old_http_link_from_config_is_shown_as_stale(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "save", lambda cfg: None)
+
+    async def main():
+        pc = Pc("ALPHA", tmp_path)
+        pc.cfg["peers"] = [{"url": "http://192.168.0.40:8765", "token": "t", "name": "СТАРЫЙ"}]
+        await pc.start()
+        try:
+            assert pc.peers.status() == [{"id": config.pc_id("t"), "name": "СТАРЫЙ", "url": "http://192.168.0.40:8765",
+                                          "connected": False, "incoming": False, "stale": True}]
+        finally:
+            await Pc.stop_all()
+
+    asyncio.run(main())
+
+
 def test_pair_page_api_manages_links(run):
     async def scenario(a, b):
         client = a.server.make_url("/pair/peers")
         http = a.peers.http
-        async with http.post(client, json={"link": b.link}) as r:
+        async with http.post(client, json={"link": b.link}, ssl=False) as r:
             assert r.status == 200
             assert [p["name"] for p in await r.json()] == ["BETA"]
-        async with http.delete(a.server.make_url(f"/pair/peers/{a.peers.items[0].id}")) as r:
+        async with http.delete(a.server.make_url(f"/pair/peers/{a.peers.items[0].id}"), ssl=False) as r:
             assert await r.json() == []
         assert a.hub.listeners == []
 
