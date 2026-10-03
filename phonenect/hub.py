@@ -119,39 +119,45 @@ class Hub:
         """Поток: следит за буфером Windows через номер последовательности."""
         mimetypes.init()  # в Windows читает реестр секунду-другую — делаем это здесь, а не в цикле событий
         while not self._stop.wait(POLL_INTERVAL):
-            with self._lock:
-                seq = cb.sequence_number()
-                if seq == self._last_seq:
-                    continue
-                self._last_seq = seq
-            if self.paused:
-                continue
-            try:
-                if cb.sensitive():  # менеджер паролей пометил копирование секретным — не публикуем
-                    continue
-            except Exception as e:
-                print("clipboard sensitivity check failed, skipping:", e)
-                continue
-            try:
-                content = cb.read()
-            except Exception as e:
-                print("clipboard read failed:", e)
-                continue
-            if not content:
-                continue
-            kind, value = content
-            if kind == "files":
-                # Одна скопированная картинка, как раньше, уходит в буфер телефона, остальное — файлами.
-                image = single_image(value)
-                if image is None:
-                    self.send_files(value)
-                    continue
-                kind, value = "image", image
-            if kind == "text":
-                clip_args = ("text", value.encode("utf-8"), "text/plain; charset=utf-8")
-            else:
-                clip_args = ("image", value, "image/png")
-            self.loop.call_soon_threadsafe(self._publish_local, *clip_args)
+            self._poll_clipboard()
+
+    def _poll_clipboard(self) -> None:
+        """Один опрос буфера: новое копирование публикуется, если не помечено секретным."""
+        with self._lock:
+            seq = cb.sequence_number()
+            if seq == self._last_seq:
+                return
+            self._last_seq = seq
+        if self.paused:
+            return
+        try:
+            if cb.sensitive():  # менеджер паролей пометил копирование секретным — не публикуем
+                return
+        except Exception as e:
+            print("clipboard sensitivity check failed, skipping:", e)
+            return
+        try:
+            content = cb.read()
+        except Exception as e:
+            print("clipboard read failed:", e)
+            return
+        if cb.sequence_number() != seq:
+            return  # буфер сменился между проверкой и чтением — следующий опрос проверит новое копирование
+        if not content:
+            return
+        kind, value = content
+        if kind == "files":
+            # Одна скопированная картинка, как раньше, уходит в буфер телефона, остальное — файлами.
+            image = single_image(value)
+            if image is None:
+                self.send_files(value)
+                return
+            kind, value = "image", image
+        if kind == "text":
+            clip_args = ("text", value.encode("utf-8"), "text/plain; charset=utf-8")
+        else:
+            clip_args = ("image", value, "image/png")
+        self.loop.call_soon_threadsafe(self._publish_local, *clip_args)
 
     def _publish_local(self, kind: str, data: bytes, mime: str) -> None:
         clip = self._add(kind, data, mime, "ПК")
