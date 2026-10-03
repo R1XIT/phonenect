@@ -4,8 +4,10 @@ import asyncio
 import concurrent.futures
 import os
 import ssl
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 import webbrowser
 import winreg
@@ -68,6 +70,25 @@ class TlsKeeper:
             return new
 
 
+def retry_os_error(start, attempts: int = 10, pause: float = 1.0):
+    """Занять порт с повторами: после перезапуска старый процесс освобождает порты не мгновенно.
+
+    Последняя ошибка пробрасывается, если порт так и не освободился."""
+    for n in range(attempts):
+        try:
+            return start()
+        except OSError:
+            if n == attempts - 1:
+                raise
+            time.sleep(pause)
+
+
+def restart_command() -> tuple[list[str], str]:
+    """Команда и рабочая папка для запуска нового экземпляра тем же интерпретатором и с теми же аргументами."""
+    project = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return [sys.executable, "-m", "phonenect", *sys.argv[1:]], project
+
+
 def run_server(hub: Hub, cfg: dict, tls: TlsKeeper, ready: threading.Event, guard: NetworkGuard) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -80,8 +101,11 @@ def run_server(hub: Hub, cfg: dict, tls: TlsKeeper, ready: threading.Event, guar
     loop.run_until_complete(runner.setup())
     loop.run_until_complete(setup_runner.setup())
     try:
-        loop.run_until_complete(web.TCPSite(runner, "0.0.0.0", cfg["port"], ssl_context=tls.context()).start())
-        loop.run_until_complete(web.TCPSite(setup_runner, "0.0.0.0", cfg["setup_port"]).start())
+        # Порты могут ещё держаться за прежним процессом (перезапуск из трея): ждём до ~10 с.
+        retry_os_error(lambda: loop.run_until_complete(
+            web.TCPSite(runner, "0.0.0.0", cfg["port"], ssl_context=tls.context()).start()))
+        retry_os_error(lambda: loop.run_until_complete(
+            web.TCPSite(setup_runner, "0.0.0.0", cfg["setup_port"]).start()))
     except OSError as e:
         # Порт занят — скорее всего, Phonenect уже запущен.
         hub.error = e
@@ -299,6 +323,33 @@ def main() -> None:
         stop_tls.set()
         icon.stop()
 
+    def revoke_all(icon, item):
+        def work():
+            import win32api
+            import win32con
+
+            answer = win32api.MessageBox(
+                0,
+                "Все телефоны и связанные ПК потеряют доступ к этому ПК, подключать их придётся заново. Продолжить?",
+                "Phonenect",
+                win32con.MB_YESNO | win32con.MB_ICONWARNING,
+            )
+            if answer != win32con.IDYES:
+                return
+            try:
+                config.rotate_token(cfg)
+                cmd, cwd = restart_command()
+                subprocess.Popen(
+                    cmd, cwd=cwd, close_fds=True,
+                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+                )
+            except Exception as e:
+                icon.notify(f"Не получилось отключить устройства: {e}", "Phonenect")
+                return
+            quit_app(icon, item)  # новый процесс дождётся, пока освободятся порты
+
+        threading.Thread(target=work, daemon=True).start()  # окно блокирует, а меню трея должно жить
+
     icon = pystray.Icon(
         "phonenect",
         tray_icon(),
@@ -314,6 +365,7 @@ def main() -> None:
             pystray.MenuItem("Пауза синхронизации", toggle_pause, checked=lambda item: hub.paused),
             pystray.MenuItem("Запускать вместе с Windows", toggle_autostart, checked=lambda item: autostart_enabled()),
             pystray.MenuItem("Открыть папку настроек", lambda: os.startfile(config.CONFIG_DIR)),
+            pystray.MenuItem("Отключить все устройства…", revoke_all),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Выход", quit_app),
         ),

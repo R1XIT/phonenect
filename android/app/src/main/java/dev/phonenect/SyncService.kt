@@ -108,6 +108,11 @@ class SyncService : Service() {
     var connected = false
         private set
 
+    /** ПК ответил 401: он отозвал доступ (в трее «Отключить все устройства»). Сбрасывается перезапуском службы. */
+    @Volatile
+    var revoked = false
+        private set
+
     /** ПК этой службы. Запоминаем при запуске: после переключения запросы старой службы не уйдут на новый ПК. */
     @Volatile
     private var pc: Pc? = null
@@ -237,6 +242,7 @@ class SyncService : Service() {
         socket = secure.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 failures = 0
+                revoked = false
                 connected = true
                 updateStatus(getString(R.string.status_connected, pc?.name ?: base.removePrefix("https://")))
                 io.execute(::fetchName)
@@ -258,6 +264,10 @@ class SyncService : Service() {
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.w(TAG, "ws failure: ${t.message}")
+                if (response?.code == 401) {
+                    onRevoked() // ключ больше не подходит: повторы не помогут, нужно подключить заново
+                    return
+                }
                 reconnect()
             }
         })
@@ -276,6 +286,13 @@ class SyncService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "info failed", e) // старая версия Phonenect на ПК — остаёмся с IP
         }
+    }
+
+    private fun onRevoked() {
+        connected = false
+        socket = null
+        revoked = true
+        updateStatus(getString(R.string.status_revoked))
     }
 
     private fun reconnect() {

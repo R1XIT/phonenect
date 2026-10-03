@@ -7,6 +7,7 @@
     <string name="status_offline">Нет связи с ПК — переподключаюсь</string>
     <string name="share_label">На ПК</string>
     <string name="files_channel_name">Файлы</string>
+    <string name="status_revoked">ПК отключил это устройство — подключите его заново (QR-код или «Настроить Android по USB»)</string>
     <string name="status_repair">Подключите ПК заново: связь теперь шифруется</string>
     <string name="download_progress">Скачивание с ПК</string>
     <string name="download_done">Скачано — нажмите, чтобы открыть</string>

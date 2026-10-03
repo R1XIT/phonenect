@@ -42,6 +42,21 @@ def save(cfg: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2), "utf-8")
 
 
+def rotate_token(cfg: dict) -> str:
+    """Отозвать доступ у всех устройств: новый ключ вместо старого. CA и остальные поля не трогаем.
+
+    Свои исходящие связи (`peers`) остаются, а список отвязанных ПК очищается: их id были привязаны
+    к старому доступу. Сервер берёт токен при создании приложения, поэтому после поворота нужен перезапуск."""
+    old = cfg.get("token")
+    new = secrets.token_urlsafe(16)
+    while new == old:
+        new = secrets.token_urlsafe(16)
+    cfg["token"] = new
+    cfg["blocked_peers"] = []
+    save(cfg)
+    return new
+
+
 def pc_name(cfg: dict) -> str:
     """Как этот ПК видят телефоны и другие ПК. Можно задать полем "name" в config.json."""
     return (cfg.get("name") or socket.gethostname())[:40]

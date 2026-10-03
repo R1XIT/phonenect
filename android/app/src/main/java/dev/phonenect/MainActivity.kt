@@ -128,6 +128,7 @@ class MainActivity : Activity() {
         val status = when {
             active == null -> "Не подключено к ПК"
             active.needsRepair -> "○ «${active.name}» подключён до шифрования — подключите заново (QR-код или «Настроить Android по USB»)"
+            service?.revoked == true -> "○ «${active.name}» отключил это устройство — подключите его заново (QR-код или «Настроить Android по USB»)"
             service?.connected == true -> "● Общий буфер с «${active.name}»"
             else -> "○ Нет связи с «${active.name}» (${active.url.removePrefix("https://")}). Проверьте, что ПК в той же сети Wi-Fi."
         }
@@ -231,6 +232,7 @@ class MainActivity : Activity() {
         texts.addView(label((if (isActive) "● " else "○ ") + pc.name, 16f, bold = isActive))
         val hint = when {
             pc.needsRepair -> "нужно переподключить — отсканируйте QR-код с ПК"
+            isActive && SyncService.instance?.revoked == true -> "ПК отключил это устройство — подключите заново (QR-код с ПК)"
             isActive -> pc.url.removePrefix("https://") + " · активный"
             else -> pc.url.removePrefix("https://") + " · коснитесь, чтобы переключиться"
         }
