@@ -19,6 +19,7 @@ from .hub import Clip, Hub
 AUTO_LIMIT = 200 * 1024 * 1024  # просто скопированные файлы больше этого между ПК не гоняем
 CHUNK = 256 * 1024
 # Большой файл качается долго: ограничиваем не всё время, а паузу без данных.
+GUARD_WAIT = 5  # секунд между проверками, не стала ли сеть доверенной
 RETRY_DELAY = 2  # секунд; растёт с числом неудач, но не больше 30
 TRANSFER_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=60)
 
@@ -82,7 +83,9 @@ class Peer:
         on_refused=lambda peer: None,
         locate=None,
         on_moved=lambda peer: None,
+        guard=None,
     ) -> None:
+        self.guard = guard  # в недоверенной сети связь не поднимаем и клипы не отправляем
         self.locate = locate  # поиск ПК в сети по id, когда по старому адресу он молчит
         self.on_moved = on_moved
         self.on_refused = on_refused  # тот ПК отвязал нас со своей стороны
@@ -121,6 +124,8 @@ class Peer:
     async def run(self) -> None:
         failures = 0
         while True:
+            while self.guard and not self.guard.trusted:
+                await asyncio.sleep(GUARD_WAIT)
             try:
                 # Представляемся: тот ПК покажет связь у себя и сможет её разорвать.
                 hello = {**self.auth, "X-Origin": self.hub.id, "X-Origin-Name": quote(self.me)}
@@ -131,15 +136,19 @@ class Peer:
                     except LinkError:
                         pass
                     self.connected = True
-                    async for msg in ws:
-                        if msg.type != aiohttp.WSMsgType.TEXT:
-                            continue
-                        data = msg.json()
-                        if data.get("event") == "clip":
-                            try:
-                                await self.incoming(data["clip"])
-                            except Exception as e:
-                                print(f"{self.name}: не удалось принять клип: {e}")
+                    watcher = asyncio.ensure_future(self.drop_when_untrusted(ws))
+                    try:
+                        async for msg in ws:
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                continue
+                            data = msg.json()
+                            if data.get("event") == "clip":
+                                try:
+                                    await self.incoming(data["clip"])
+                                except Exception as e:
+                                    print(f"{self.name}: не удалось принять клип: {e}")
+                    finally:
+                        watcher.cancel()
             except asyncio.CancelledError:
                 raise
             except aiohttp.WSServerHandshakeError as e:
@@ -154,6 +163,14 @@ class Peer:
             if failures % 3 == 0 and self.locate:
                 await self.relocate()
             await asyncio.sleep(min(30, RETRY_DELAY * failures))
+
+    async def drop_when_untrusted(self, ws) -> None:
+        """Ушли из доверенной сети — рвём уже поднятую связь."""
+        if self.guard is None:
+            return
+        while self.guard.trusted:
+            await asyncio.sleep(GUARD_WAIT)
+        await ws.close()
 
     async def relocate(self) -> None:
         """Тот ПК мог сменить IP (DHCP): ищем его по id и запоминаем новый адрес."""
@@ -200,7 +217,7 @@ class Peer:
     # ---------- отсюда туда ----------
 
     def on_clip(self, clip: Clip) -> None:
-        if clip.origin != self.hub.id or not self.connected:
+        if clip.origin != self.hub.id or not self.connected or (self.guard and not self.guard.trusted):
             return
         if clip.kind != "file":
             self.outbox.put_nowait(clip)
@@ -244,8 +261,8 @@ async def find_on_lan(pc_id: str) -> tuple[str, int] | None:
 class Peers:
     """Связанные ПК: список в config.json ("peers"), подключения живут в цикле событий хаба."""
 
-    def __init__(self, hub: Hub, cfg: dict) -> None:
-        self.hub, self.cfg = hub, cfg
+    def __init__(self, hub: Hub, cfg: dict, guard=None) -> None:
+        self.hub, self.cfg, self.guard = hub, cfg, guard
         self.me = config.pc_name(cfg)
         self.my_id = config.pc_id(cfg["token"])
         self.items: list[Peer] = []
@@ -269,6 +286,7 @@ class Peers:
             on_refused=self._refused,
             locate=lambda pc_id: self.find(pc_id),  # через self — чтобы поиск можно было подменить
             on_moved=lambda _: self._save(),
+            guard=self.guard,
         )
         self.items.append(peer)
         peer.start()

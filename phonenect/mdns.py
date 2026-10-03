@@ -38,12 +38,14 @@ def find(pc_id: str, timeout: float = 5) -> tuple[str, int] | None:
 
 
 class Advertiser:
-    def __init__(self, cfg: dict) -> None:
-        self.cfg = cfg
+    def __init__(self, cfg: dict, guard=None) -> None:
+        self.cfg, self.guard = cfg, guard
         self.ip: str | None = None
         self.zc: Zeroconf | None = None
         self.infos: list[ServiceInfo] = []
         self._stop = threading.Event()
+        self._wake = threading.Event()  # проверить сеть и IP прямо сейчас
+        self.recheck = RECHECK
 
     def _register(self, ip: str) -> None:
         self._unregister()
@@ -81,14 +83,26 @@ class Advertiser:
         """Поток: регистрирует имя и перерегистрирует его при смене IP."""
         while True:
             ip = config.lan_ip(self.cfg)
-            if ip != self.ip and not ip.startswith("127."):
+            if self.guard and not self.guard.trusted:
+                # Чужая сеть: ПК не объявляем; вернёмся в доверенную — зарегистрируемся заново.
+                if self.zc:
+                    self._unregister()
+                    self.ip = None
+            elif ip != self.ip and not ip.startswith("127."):
                 try:
                     self._register(ip)
                 except Exception as e:
                     print("mDNS недоступен:", e)
-            if self._stop.wait(RECHECK):
+            self._wake.wait(self.recheck)
+            self._wake.clear()
+            if self._stop.is_set():
                 break
         self._unregister()
 
+    def poke(self) -> None:
+        """Доверие к сети изменилось — не ждать следующей проверки."""
+        self._wake.set()
+
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()

@@ -19,14 +19,14 @@ async def nowhere(pc_id):
 class Pc:
     started: list["Pc"] = []  # все запущенные в сценарии — чтобы остановить их разом
 
-    def __init__(self, name: str, tmp_path, key: str | None = None):
+    def __init__(self, name: str, tmp_path, key: str | None = None, guard=None):
         key = key or name  # у двух ПК может быть одно имя — различаются токеном и папкой
         self.cfg = {"token": f"token-{key}", "port": 1, "name": name}
         self.hub = Hub(tmp_path / key, name, config.pc_id(self.cfg["token"]))
         self.hub.files_dir.mkdir()
         self.hub.paused = True  # не писать в настоящий буфер Windows
         self.cert_dir, self.fp = make_certs(tmp_path / f"certs-{key}")  # у каждого ПК свой CA
-        self.peers = Peers(self.hub, self.cfg)
+        self.peers = Peers(self.hub, self.cfg, guard=guard)
         self.peers.find = nowhere  # настоящий поиск по mDNS в тестах не нужен и идёт секунды
         self.server: TestServer | None = None
 
@@ -419,3 +419,59 @@ def test_pair_page_api_manages_links(run):
         assert a.hub.listeners == []
 
     run(scenario)
+
+
+class Guard:
+    """Вместо NetworkGuard: доверие переключаем руками."""
+
+    def __init__(self, trusted: bool):
+        self.trusted = trusted
+
+
+def test_no_link_and_no_clips_in_untrusted_network_until_it_becomes_trusted(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "save", lambda cfg: None)
+    monkeypatch.setattr(peers_module, "GUARD_WAIT", 0.05)
+
+    async def main():
+        guard = Guard(False)
+        a, b = Pc("ALPHA", tmp_path, guard=guard), Pc("BETA", tmp_path)
+        await a.start()
+        await b.start()
+        try:
+            await a.peers.add(b.link)
+            await asyncio.sleep(0.5)
+            assert not a.peers.items[0].connected
+            a.copy("в чужой сети")
+            await asyncio.sleep(0.3)
+            assert b.texts() == []
+            guard.trusted = True
+            await until(lambda: a.peers.items[0].connected)
+            a.copy("дома")
+            await until(lambda: ("ALPHA", "дома") in b.texts())
+            assert ("ALPHA", "в чужой сети") not in b.texts()
+        finally:
+            await Pc.stop_all()
+
+    asyncio.run(main())
+
+
+def test_link_drops_when_network_becomes_untrusted(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "save", lambda cfg: None)
+    monkeypatch.setattr(peers_module, "GUARD_WAIT", 0.05)
+
+    async def main():
+        guard = Guard(True)
+        a, b = Pc("ALPHA", tmp_path, guard=guard), Pc("BETA", tmp_path)
+        await a.start()
+        await b.start()
+        try:
+            await linked(a, b)
+            guard.trusted = False
+            await until(lambda: not a.peers.items[0].connected)
+            a.copy("после ухода из дома")
+            await asyncio.sleep(0.3)
+            assert b.texts() == []
+        finally:
+            await Pc.stop_all()
+
+    asyncio.run(main())

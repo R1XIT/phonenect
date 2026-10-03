@@ -111,6 +111,18 @@ async def local_pages(request: web.Request, handler):
     return await handler(request)
 
 
+def network_gate(guard) -> Callable:
+    """В недоверенной сети отвечаем только самому ПК: с телефонов и других ПК запросы не принимаем."""
+
+    @web.middleware
+    async def gate(request: web.Request, handler):
+        if request.remote not in ("127.0.0.1", "::1") and not guard.trusted:
+            raise web.HTTPForbidden(text="Phonenect выключен: эта сеть не отмечена как доверенная")
+        return await handler(request)
+
+    return gate
+
+
 def qr_svg(text: str) -> web.Response:
     img = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage, box_size=12)
     buf = io.BytesIO()
@@ -178,7 +190,7 @@ def pair_routes(cfg: dict, base: Callable[[], str], peers: Peers, fp: str) -> li
 
 
 def create_app(
-    hub: Hub, cfg: dict, base_url: Callable[[], str] | str, peers: Peers, cert_dir: Path, fp: str
+    hub: Hub, cfg: dict, base_url: Callable[[], str] | str, peers: Peers, cert_dir: Path, fp: str, guard=None
 ) -> web.Application:
     token = cfg["token"]
     name = config.pc_name(cfg)
@@ -352,7 +364,8 @@ def create_app(
     async def static(request):
         return web.FileResponse(WEB_DIR / request.path.lstrip("/"))
 
-    app = web.Application(middlewares=[auth], client_max_size=MAX_BODY)
+    middlewares = [network_gate(guard), auth] if guard else [auth]
+    app = web.Application(middlewares=middlewares, client_max_size=MAX_BODY)
     app.add_routes(
         [
             web.get("/", index),
@@ -374,7 +387,8 @@ def create_app(
 
 
 def create_setup_app(
-    cfg: dict, cert_dir: Path, fp: str, base_url: Callable[[], str] | str, peers: Peers | None = None
+    cfg: dict, cert_dir: Path, fp: str, base_url: Callable[[], str] | str, peers: Peers | None = None,
+    guard=None
 ) -> web.Application:
     """HTTP-порт без секретов: сертификат, профиль iOS, приложение, команды. Токен здесь не нужен и не принимается."""
     name = config.pc_name(cfg)
@@ -398,7 +412,8 @@ def create_setup_app(
         return web.FileResponse(WEB_DIR / "icon.svg")
 
     # С peers отсюда открывается и страница подключения — только с самого ПК: браузер ПК не знает нашего CA.
-    app = web.Application(middlewares=[local_pages] if peers is not None else [])
+    middlewares = ([network_gate(guard)] if guard else []) + ([local_pages] if peers is not None else [])
+    app = web.Application(middlewares=middlewares)
     if peers is not None:
         app.add_routes(pair_routes(cfg, base, peers, fp))
     app.add_routes([

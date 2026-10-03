@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw
 from . import android_setup, certs, config
 from .hub import Hub
 from .mdns import Advertiser
+from .network import NetworkGuard
 from .peers import Peers
 from .server import create_app, create_setup_app
 
@@ -67,15 +68,15 @@ class TlsKeeper:
             return new
 
 
-def run_server(hub: Hub, cfg: dict, tls: TlsKeeper, ready: threading.Event) -> None:
+def run_server(hub: Hub, cfg: dict, tls: TlsKeeper, ready: threading.Event, guard: NetworkGuard) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     hub.loop = loop
     tls.loop = loop
     base =lambda: f"https://{config.lan_ip(cfg)}:{cfg['port']}"  # IP может смениться на ходу
-    peers = Peers(hub, cfg)
-    runner = web.AppRunner(create_app(hub, cfg, base, peers, tls.dir, tls.fp))
-    setup_runner = web.AppRunner(create_setup_app(cfg, tls.dir, tls.fp, base, peers))
+    peers = Peers(hub, cfg, guard)
+    runner = web.AppRunner(create_app(hub, cfg, base, peers, tls.dir, tls.fp, guard))
+    setup_runner = web.AppRunner(create_setup_app(cfg, tls.dir, tls.fp, base, peers, guard))
     loop.run_until_complete(runner.setup())
     loop.run_until_complete(setup_runner.setup())
     try:
@@ -91,6 +92,8 @@ def run_server(hub: Hub, cfg: dict, tls: TlsKeeper, ready: threading.Event) -> N
     loop.run_forever()
 
 
+TITLE = "Phonenect — общий буфер"
+TITLE_UNTRUSTED = "Phonenect — сеть не доверенная, синхронизация выключена"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
@@ -154,6 +157,9 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = config.load()
+    guard = NetworkGuard(cfg)
+    guard.migrate()  # первый запуск этой версии: текущая сеть становится доверенной
+    guard.refresh()
     try:
         tls = TlsKeeper(cfg, config.CONFIG_DIR)
         tls.refresh(config.lan_ip(cfg))
@@ -191,13 +197,13 @@ def main() -> None:
     files_dir = config.files_dir(cfg)
     hub = Hub(files_dir, config.pc_name(cfg), config.pc_id(cfg["token"]))
     ready = threading.Event()
-    threading.Thread(target=run_server, args=(hub, cfg, tls, ready), daemon=True).start()
+    threading.Thread(target=run_server, args=(hub, cfg, tls, ready, guard), daemon=True).start()
     ready.wait()
     if getattr(hub, "error", None):
         print(f"Не удалось занять порт {cfg['port']}: {hub.error}. Phonenect уже запущен?")
         sys.exit(1)
     threading.Thread(target=hub.watch_clipboard, daemon=True).start()
-    mdns = Advertiser(cfg)
+    mdns = Advertiser(cfg, guard)
     threading.Thread(target=mdns.run, daemon=True).start()
 
     stop_tls = threading.Event()
@@ -211,6 +217,28 @@ def main() -> None:
                 print("Не удалось обновить сертификат:", e)
 
     threading.Thread(target=keep_tls_fresh, daemon=True).start()
+
+    icon = None  # создаётся ниже; без трея остаётся None
+
+    def network_changed() -> None:
+        mdns.poke()  # объявить ПК или снять объявление сразу
+        if icon:
+            try:
+                icon.title = TITLE if guard.trusted else TITLE_UNTRUSTED
+                icon.update_menu()
+            except Exception as e:  # значок ещё не показан
+                print("Не удалось обновить значок:", e)
+
+    def watch_network() -> None:
+        # Раз в минуту: сменилась сеть — доверие могло измениться.
+        while not stop_tls.wait(60):
+            try:
+                if guard.refresh():
+                    network_changed()
+            except Exception as e:
+                print("Не удалось определить сеть:", e)
+
+    threading.Thread(target=watch_network, daemon=True).start()
 
     print(f"Phonenect запущен: {base_url}")
     print(f"Отпечаток сертификата: {tls.fp}")
@@ -233,6 +261,17 @@ def main() -> None:
                 icon.notify(f"Отправлено на телефоны: {len(paths)} шт.", "Phonenect")
 
         threading.Thread(target=work, daemon=True).start()
+
+    def toggle_trust(icon, item):
+        def work():
+            guard.toggle()
+            guard.refresh()
+            network_changed()
+
+        threading.Thread(target=work, daemon=True).start()  # определение сети идёт секунды
+
+    def trust_label(item) -> str:
+        return f"Доверять сети «{guard.name}»" if guard.name else "Доверять этой сети"
 
     def toggle_pause(icon, item):
         hub.paused = not hub.paused
@@ -259,7 +298,7 @@ def main() -> None:
     icon = pystray.Icon(
         "phonenect",
         tray_icon(),
-        "Phonenect — общий буфер",
+        TITLE if guard.trusted else TITLE_UNTRUSTED,
         menu=pystray.Menu(
             pystray.MenuItem("Подключить телефон…", lambda: webbrowser.open(local_pair), default=True),
             pystray.MenuItem("Связать с другим ПК…", lambda: webbrowser.open(local_pair + "#pc")),
@@ -267,6 +306,7 @@ def main() -> None:
             pystray.MenuItem("Открыть полученные файлы", lambda: os.startfile(files_dir)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Настроить Android по USB", setup_android),
+            pystray.MenuItem(trust_label, toggle_trust, checked=lambda item: guard.trusted, enabled=lambda item: bool(guard.name)),
             pystray.MenuItem("Пауза синхронизации", toggle_pause, checked=lambda item: hub.paused),
             pystray.MenuItem("Запускать вместе с Windows", toggle_autostart, checked=lambda item: autostart_enabled()),
             pystray.MenuItem("Открыть папку настроек", lambda: os.startfile(config.CONFIG_DIR)),
