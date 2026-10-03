@@ -88,3 +88,101 @@ def test_retry_gives_up_after_attempts():
         assert time.monotonic() - t0 < 2
     finally:
         holder.close()
+
+
+def test_retry_does_not_retry_other_errors():
+    calls = []
+
+    def start():
+        calls.append(1)
+        raise PermissionError(13, "нет доступа")  # errno 13 без winerror: не «порт занят»
+
+    with pytest.raises(OSError):
+        retry_os_error(start, attempts=5, pause=0.01)
+    assert len(calls) == 1
+
+
+def test_restart_command(monkeypatch):
+    import os
+    import sys
+
+    from phonenect.__main__ import restart_command
+
+    monkeypatch.setattr(sys, "argv", ["phonenect", "--no-tray"])
+    cmd, cwd = restart_command()
+    assert cmd[0] == sys.executable
+    assert cmd[1:3] == ["-m", "phonenect"]
+    assert cmd[3:] == ["--no-tray"]
+    assert os.path.isfile(os.path.join(cwd, "phonenect", "__main__.py"))
+
+
+# ---------- revoke_all_devices ----------
+
+def run_revoke(confirm=True, rotate_exc=None, spawn_exc=None, lock=None):
+    from phonenect.__main__ import revoke_all_devices
+
+    log = []
+
+    def rotate():
+        log.append("rotate")
+        if rotate_exc:
+            raise rotate_exc
+
+    def spawn():
+        log.append("spawn")
+        if spawn_exc:
+            raise spawn_exc
+
+    kwargs = {"lock": lock} if lock else {}
+    revoke_all_devices(lambda: confirm, rotate, spawn, lambda t: log.append(("show", t)),
+                       lambda: log.append("quit"), **kwargs)
+    return log
+
+
+def test_revoke_ok_spawns_and_quits():
+    assert run_revoke(lock=threading.Lock()) == ["rotate", "spawn", "quit"]
+
+
+def test_revoke_spawn_fails_shows_message_and_quits():
+    log = run_revoke(spawn_exc=OSError("x"), lock=threading.Lock())
+    assert log[:2] == ["rotate", "spawn"]
+    assert log[2] == ("show", "Ключ доступа заменён, но Phonenect не смог перезапуститься — запустите его вручную.")
+    assert log[3] == "quit"
+
+
+def test_revoke_save_fails_shows_message_and_quits_without_spawn():
+    log = run_revoke(rotate_exc=OSError("диск"), lock=threading.Lock())
+    assert log[0] == "rotate" and "spawn" not in log
+    assert log[1] == ("show", "Не удалось сохранить новый ключ доступа: диск. Phonenect остановлен.")
+    assert log[2] == "quit"
+
+
+def test_revoke_declined_does_nothing_and_allows_retry():
+    lock = threading.Lock()
+    assert run_revoke(confirm=False, lock=lock) == []
+    assert run_revoke(lock=lock) == ["rotate", "spawn", "quit"]  # замок отпущен
+
+
+def test_revoke_second_click_while_dialog_open_is_ignored():
+    from phonenect.__main__ import revoke_all_devices
+
+    lock = threading.Lock()
+    log = []
+    inside = threading.Event()
+    release = threading.Event()
+
+    def slow_confirm():
+        inside.set()
+        release.wait(5)
+        return True
+
+    t = threading.Thread(target=revoke_all_devices, args=(
+        slow_confirm, lambda: log.append("rotate"), lambda: log.append("spawn"), lambda t: None,
+        lambda: log.append("quit"), lock))
+    t.start()
+    assert inside.wait(5)
+    revoke_all_devices(lambda: log.append("second dialog") or True, lambda: log.append("rotate2"),
+                       lambda: None, lambda t: None, lambda: None, lock)
+    release.set()
+    t.join(5)
+    assert log == ["rotate", "spawn", "quit"]

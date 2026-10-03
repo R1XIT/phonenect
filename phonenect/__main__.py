@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import concurrent.futures
+import errno
 import os
 import ssl
 import subprocess
@@ -70,15 +71,22 @@ class TlsKeeper:
             return new
 
 
+_PORT_BUSY_WINERRORS = (10048, 10013)  # WSAEADDRINUSE, WSAEACCES (порт занят другим процессом)
+
+
+def _port_busy(e: OSError) -> bool:
+    return e.errno == errno.EADDRINUSE or getattr(e, "winerror", None) in _PORT_BUSY_WINERRORS
+
+
 def retry_os_error(start, attempts: int = 10, pause: float = 1.0):
     """Занять порт с повторами: после перезапуска старый процесс освобождает порты не мгновенно.
 
-    Последняя ошибка пробрасывается, если порт так и не освободился."""
+    Повторяем только при «адрес занят»; другие ошибки и последняя неудача пробрасываются."""
     for n in range(attempts):
         try:
             return start()
-        except OSError:
-            if n == attempts - 1:
+        except OSError as e:
+            if not _port_busy(e) or n == attempts - 1:
                 raise
             time.sleep(pause)
 
@@ -87,6 +95,34 @@ def restart_command() -> tuple[list[str], str]:
     """Команда и рабочая папка для запуска нового экземпляра тем же интерпретатором и с теми же аргументами."""
     project = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return [sys.executable, "-m", "phonenect", *sys.argv[1:]], project
+
+
+REVOKE_LOCK = threading.Lock()
+
+
+def revoke_all_devices(confirm, rotate, spawn, show, quit_, lock=REVOKE_LOCK) -> None:
+    """«Отключить все устройства»: после подтверждения процесс обязан остановиться в любом случае,
+    иначе отозванный ключ продолжал бы работать. Всё внешнее передаётся извне (для тестов)."""
+    if not lock.acquire(blocking=False):
+        return  # окно уже открыто или отзыв идёт
+    if not confirm():
+        lock.release()
+        return
+    problem = None
+    try:
+        rotate()
+    except Exception as e:
+        problem = f"Не удалось сохранить новый ключ доступа: {e}. Phonenect остановлен."
+    else:
+        try:
+            spawn()
+        except Exception:
+            problem = "Ключ доступа заменён, но Phonenect не смог перезапуститься — запустите его вручную."
+    try:
+        if problem:
+            show(problem)
+    finally:
+        quit_()  # замок не отпускаем: процесс завершается
 
 
 def run_server(hub: Hub, cfg: dict, tls: TlsKeeper, ready: threading.Event, guard: NetworkGuard) -> None:
@@ -324,31 +360,33 @@ def main() -> None:
         icon.stop()
 
     def revoke_all(icon, item):
-        def work():
-            import win32api
-            import win32con
+        import win32api
+        import win32con
 
-            answer = win32api.MessageBox(
+        flags = win32con.MB_TOPMOST | win32con.MB_SETFOREGROUND
+
+        def confirm() -> bool:
+            return win32api.MessageBox(
                 0,
                 "Все телефоны и связанные ПК потеряют доступ к этому ПК, подключать их придётся заново. Продолжить?",
                 "Phonenect",
-                win32con.MB_YESNO | win32con.MB_ICONWARNING,
-            )
-            if answer != win32con.IDYES:
-                return
-            try:
-                config.rotate_token(cfg)
-                cmd, cwd = restart_command()
-                subprocess.Popen(
-                    cmd, cwd=cwd, close_fds=True,
-                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
-                )
-            except Exception as e:
-                icon.notify(f"Не получилось отключить устройства: {e}", "Phonenect")
-                return
-            quit_app(icon, item)  # новый процесс дождётся, пока освободятся порты
+                win32con.MB_YESNO | win32con.MB_ICONWARNING | flags,
+            ) == win32con.IDYES
 
-        threading.Thread(target=work, daemon=True).start()  # окно блокирует, а меню трея должно жить
+        def spawn() -> None:
+            cmd, cwd = restart_command()
+            subprocess.Popen(
+                cmd, cwd=cwd, close_fds=True,
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+            )
+
+        def show(text: str) -> None:
+            win32api.MessageBox(0, text, "Phonenect", win32con.MB_ICONERROR | flags)
+
+        threading.Thread(  # окно блокирует, а меню трея должно жить
+            target=revoke_all_devices, daemon=True,
+            args=(confirm, lambda: config.rotate_token(cfg), spawn, show, lambda: quit_app(icon, item)),
+        ).start()
 
     icon = pystray.Icon(
         "phonenect",
