@@ -83,6 +83,8 @@ class Hub:
         self.id = pc_id  # постоянный id этого ПК — для origin
         self.history: deque[Clip] = deque(maxlen=HISTORY_SIZE)
         self.sockets: set = set()
+        self.local_sockets: set = set()  # из sockets: подключения с самого ПК
+        self.guard = None  # NetworkGuard: в недоверенной сети клипы уходят только на самый ПК
         self.paused = False
         self.files_dir = files_dir
         self.on_file: Callable[[Clip], None] | None = None  # пришёл файл с телефона — для уведомления
@@ -281,10 +283,20 @@ class Hub:
             listener(clip)
         msg = {"event": "clip", "clip": clip.meta()}
         for ws in list(self.sockets):
+            if self.guard and not self.guard.trusted and ws not in self.local_sockets:
+                continue
             try:
                 await ws.send_json(msg)
             except Exception:
                 self.sockets.discard(ws)
+
+    async def close_remote_sockets(self) -> None:
+        """Сеть перестала быть доверенной: телефоны и другие ПК больше не получают клипы. Звать на цикле хаба."""
+        for ws in [w for w in self.sockets if w not in self.local_sockets]:
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
 
 class _HtmlText(HTMLParser):

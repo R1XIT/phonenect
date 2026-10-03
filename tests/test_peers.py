@@ -1,6 +1,7 @@
 """Связь двух ПК: два настоящих сервера Phonenect в одном процессе, буфер Windows не трогаем."""
 import asyncio
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestServer
 
@@ -20,10 +21,12 @@ class Pc:
     started: list["Pc"] = []  # все запущенные в сценарии — чтобы остановить их разом
 
     def __init__(self, name: str, tmp_path, key: str | None = None, guard=None):
+        self.guard = guard
         key = key or name  # у двух ПК может быть одно имя — различаются токеном и папкой
         self.cfg = {"token": f"token-{key}", "port": 1, "name": name}
         self.hub = Hub(tmp_path / key, name, config.pc_id(self.cfg["token"]))
         self.hub.files_dir.mkdir()
+        self.hub.guard = guard
         self.hub.paused = True  # не писать в настоящий буфер Windows
         self.cert_dir, self.fp = make_certs(tmp_path / f"certs-{key}")  # у каждого ПК свой CA
         self.peers = Peers(self.hub, self.cfg, guard=guard)
@@ -33,7 +36,8 @@ class Pc:
     async def start(self):
         self.hub.loop = asyncio.get_running_loop()
         self.peers.start()
-        self.server = TestServer(create_app(self.hub, self.cfg, "https://x", self.peers, self.cert_dir, self.fp))
+        self.server = TestServer(create_app(self.hub, self.cfg, "https://x", self.peers, self.cert_dir, self.fp,
+                                           guard=self.guard))
         await self.server.start_server(ssl=server_ssl(self.cert_dir))
         Pc.started.append(self)
 
@@ -473,5 +477,87 @@ def test_link_drops_when_network_becomes_untrusted(tmp_path, monkeypatch):
             assert b.texts() == []
         finally:
             await Pc.stop_all()
+
+    asyncio.run(main())
+
+
+def test_untrusted_other_pc_does_not_make_us_drop_the_link(tmp_path, monkeypatch):
+    from phonenect import server
+
+    monkeypatch.setattr(config, "save", lambda cfg: None)
+    monkeypatch.setattr(peers_module, "RETRY_DELAY", 0.1)
+    monkeypatch.setattr(server, "is_this_pc", lambda request: False)  # в тестах все запросы с 127.0.0.1
+
+    async def main():
+        beta_guard = Guard(False)
+        a, b = Pc("ALPHA", tmp_path), Pc("BETA", tmp_path, guard=beta_guard)
+        await a.start()
+        await b.start()
+        try:
+            # Связываемся, пока BETA доверяет сети, потом BETA «переезжает» в чужую сеть.
+            beta_guard.trusted = True
+            await linked(a, b)
+            beta_guard.trusted = False
+            for ws in list(b.hub.sockets):
+                await ws.close()
+            await until(lambda: not a.peers.items[0].connected)
+            await asyncio.sleep(0.8)  # несколько попыток и ответов 503
+            assert len(a.peers.items) == 1 and a.cfg["peers"]
+            beta_guard.trusted = True
+            await until(lambda: a.peers.items[0].connected, timeout=10)
+            a.copy("после возвращения")
+            await until(lambda: ("ALPHA", "после возвращения") in b.texts())
+        finally:
+            await Pc.stop_all()
+
+    asyncio.run(main())
+
+
+def test_revoking_trust_closes_open_sockets_and_stops_clips(tmp_path, monkeypatch):
+    from phonenect import server
+
+    monkeypatch.setattr(config, "save", lambda cfg: None)
+    monkeypatch.setattr(server, "is_this_pc", lambda request: False)
+
+    async def main():
+        guard = Guard(True)
+        a = Pc("ALPHA", tmp_path, guard=guard)
+        await a.start()
+        try:
+            async with a.peers.http.ws_connect(
+                a.server.make_url(f"/ws?t={a.cfg['token']}"), ssl=False
+            ) as ws:
+                assert (await ws.receive_json())["event"] == "history"
+                a.copy("пока доверяем")
+                assert (await ws.receive_json())["clip"]["text"] == "пока доверяем"
+                guard.trusted = False
+                await a.hub.close_remote_sockets()
+                a.copy("после отзыва")
+                msg = await ws.receive(timeout=3)
+                assert msg.type != aiohttp.WSMsgType.TEXT
+                assert ws.closed or msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED)
+        finally:
+            await Pc.stop_all()
+
+    asyncio.run(main())
+
+
+def test_broadcast_skips_remote_sockets_while_untrusted(tmp_path):
+    class Sock:
+        def __init__(self):
+            self.sent = []
+
+        async def send_json(self, msg):
+            self.sent.append(msg)
+
+    async def main():
+        hub = Hub(tmp_path, "ДОМ", "id")
+        hub.guard = Guard(False)
+        mine, phone = Sock(), Sock()
+        hub.sockets |= {mine, phone}
+        hub.local_sockets.add(mine)
+        clip = hub._add("text", b"x", "text/plain", "ПК")
+        await hub.broadcast(clip)
+        assert len(mine.sent) == 1 and phone.sent == []
 
     asyncio.run(main())

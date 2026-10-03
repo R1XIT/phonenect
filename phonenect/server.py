@@ -111,13 +111,18 @@ async def local_pages(request: web.Request, handler):
     return await handler(request)
 
 
+def is_this_pc(request: web.Request) -> bool:
+    return request.remote in ("127.0.0.1", "::1")
+
+
 def network_gate(guard) -> Callable:
     """В недоверенной сети отвечаем только самому ПК: с телефонов и других ПК запросы не принимаем."""
 
     @web.middleware
     async def gate(request: web.Request, handler):
-        if request.remote not in ("127.0.0.1", "::1") and not guard.trusted:
-            raise web.HTTPForbidden(text="Phonenect выключен: эта сеть не отмечена как доверенная")
+        if not is_this_pc(request) and not guard.trusted:
+            # Не 403: так другой ПК понимает «нас отвязали» и удаляет связь. Здесь — временно.
+            raise web.HTTPServiceUnavailable(text="Phonenect выключен: эта сеть не отмечена как доверенная")
         return await handler(request)
 
     return gate
@@ -345,6 +350,8 @@ def create_app(
         ws = web.WebSocketResponse(heartbeat=25)
         await ws.prepare(request)
         hub.sockets.add(ws)
+        if is_this_pc(request):
+            hub.local_sockets.add(ws)
         if origin:
             peers.connected_in(origin, unquote(request.headers.get("X-Origin-Name", "")) or origin, ws)
         try:
@@ -354,6 +361,7 @@ def create_app(
                     break
         finally:
             hub.sockets.discard(ws)
+            hub.local_sockets.discard(ws)
             if origin:
                 peers.disconnected_in(origin, ws)
         return ws

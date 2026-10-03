@@ -182,10 +182,10 @@ def ask(guard, remote: str):
     return asyncio.run(go())
 
 
-def test_gate_refuses_remote_request_in_untrusted_network():
+def test_gate_answers_503_not_403_to_remote_request_in_untrusted_network():
     guard = guard_in({"trusted_networks": []}, "Cafe")
     guard.refresh()
-    assert ask(guard, "192.168.0.40") == (403, "Phonenect выключен: эта сеть не отмечена как доверенная")
+    assert ask(guard, "192.168.0.40") == (503, "Phonenect выключен: эта сеть не отмечена как доверенная")
 
 
 def test_gate_lets_this_pc_through_in_untrusted_network():
@@ -229,8 +229,8 @@ def test_both_apps_close_for_remote_when_untrusted(tmp_path, path):
     guard.refresh()
     main = create_app(hub, cfg, "https://x", Peers(hub, cfg), cert_dir, fp, guard=guard)
     setup = create_setup_app(cfg, cert_dir, fp, "https://x", guard=guard)
-    assert through_app(main, "192.168.0.40", path) == 403
-    assert through_app(setup, "192.168.0.40", path) == 403
+    assert through_app(main, "192.168.0.40", path) == 503
+    assert through_app(setup, "192.168.0.40", path) == 503
     assert through_app(setup, "127.0.0.1", "/ca.crt") == 200
     guard.move("Home")
     guard.cfg["trusted_networks"].append("Home")

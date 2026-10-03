@@ -196,6 +196,7 @@ def main() -> None:
 
     files_dir = config.files_dir(cfg)
     hub = Hub(files_dir, config.pc_name(cfg), config.pc_id(cfg["token"]))
+    hub.guard = guard
     ready = threading.Event()
     threading.Thread(target=run_server, args=(hub, cfg, tls, ready, guard), daemon=True).start()
     ready.wait()
@@ -222,6 +223,8 @@ def main() -> None:
 
     def network_changed() -> None:
         mdns.poke()  # объявить ПК или снять объявление сразу
+        if not guard.trusted and hub.loop:
+            asyncio.run_coroutine_threadsafe(hub.close_remote_sockets(), hub.loop)  # открытые связи рвём
         if icon:
             try:
                 icon.title = TITLE if guard.trusted else TITLE_UNTRUSTED
@@ -264,6 +267,7 @@ def main() -> None:
 
     def toggle_trust(icon, item):
         def work():
+            guard.refresh()  # имя сети могло устареть
             guard.toggle()
             guard.refresh()
             network_changed()
