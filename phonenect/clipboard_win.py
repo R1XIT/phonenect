@@ -28,6 +28,47 @@ def _open(retries: int = 10) -> None:
     win32clipboard.OpenClipboard()
 
 
+# Форматы, которыми менеджеры паролей помечают скопированное секретное.
+SECRET_PRESENT = ("ExcludeClipboardContentFromMonitorProcessing", "Clipboard Viewer Ignore")  # сам формат = секрет
+SECRET_IF_ZERO = ("CanIncludeInClipboardHistory", "CanUploadToCloudClipboard")  # секрет, если DWORD равен 0
+
+
+def is_sensitive(formats: dict[str, bytes | None]) -> bool:
+    """formats: имя формата -> данные (None, если не читали). Секрет — только по явным признакам."""
+    if any(name in formats for name in SECRET_PRESENT):
+        return True
+    for name in SECRET_IF_ZERO:
+        data = formats.get(name)
+        if data is not None and len(data) == 4 and struct.unpack("<I", data)[0] == 0:
+            return True
+    return False
+
+
+def sensitive() -> bool:
+    """Пометил ли менеджер паролей текущее содержимое буфера секретным."""
+    _open()
+    try:
+        formats: dict[str, bytes | None] = {}
+        fmt = win32clipboard.EnumClipboardFormats(0)
+        while fmt:
+            try:
+                name = win32clipboard.GetClipboardFormatName(fmt)
+            except Exception:
+                name = None  # стандартный формат без имени
+            if name:
+                data = None
+                if name in SECRET_IF_ZERO:
+                    try:
+                        data = win32clipboard.GetClipboardData(fmt)
+                    except Exception:
+                        data = None
+                formats[name] = data if isinstance(data, bytes) else None
+            fmt = win32clipboard.EnumClipboardFormats(fmt)
+        return is_sensitive(formats)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
 def read():
     """Возвращает ("text", str), ("image", png_bytes), ("files", [пути]) или None."""
     try:

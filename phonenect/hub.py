@@ -127,6 +127,12 @@ class Hub:
             if self.paused:
                 continue
             try:
+                if cb.sensitive():  # менеджер паролей пометил копирование секретным — не публикуем
+                    continue
+            except Exception as e:
+                print("clipboard sensitivity check failed, skipping:", e)
+                continue
+            try:
                 content = cb.read()
             except Exception as e:
                 print("clipboard read failed:", e)

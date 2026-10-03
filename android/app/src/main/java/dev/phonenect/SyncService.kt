@@ -446,6 +446,7 @@ class SyncService : Service() {
     /** Отправить содержимое буфера на ПК. Повторы сервер отбрасывает сам (X-Auto). */
     fun sendClip(clip: ClipData) {
         if (clip.itemCount == 0 || client == null) return  // без шифрования буфер не отправляем
+        if (ClipPolicy.isSensitive(clip.description?.extras)) return  // менеджер паролей пометил секретным
         val item = clip.getItemAt(0)
         io.execute {
             try {
