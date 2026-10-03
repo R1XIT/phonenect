@@ -82,6 +82,7 @@ class Advertiser:
     def run(self) -> None:
         """Поток: регистрирует имя и перерегистрирует его при смене IP."""
         while True:
+            self._wake.clear()  # до работы, а не после ожидания: poke() посреди цикла не теряется
             ip = config.lan_ip(self.cfg)
             if self.guard and not self.guard.trusted:
                 # Чужая сеть: ПК не объявляем; вернёмся в доверенную — зарегистрируемся заново.
@@ -94,7 +95,6 @@ class Advertiser:
                 except Exception as e:
                     print("mDNS недоступен:", e)
             self._wake.wait(self.recheck)
-            self._wake.clear()
             if self._stop.is_set():
                 break
         self._unregister()

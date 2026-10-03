@@ -9,7 +9,7 @@ import org.junit.Test
 class PcListTest {
     private val fp = "a".repeat(64)
     private val home = PcList.parseLink("phonenect://pair?url=https%3A%2F%2F192.168.0.25%3A8765&t=HOME&name=%D0%94%D0%BE%D0%BC&fp=$fp")!!
-    private val work = PcList.parseLink("https://192.168.0.40:8765/api/clip?t=WORK&fp=$fp")!!
+    private val work = PcList.parseLink("https://192.168.0.40:8765/api/clip?t=WORK&fp=${"b".repeat(64)}")!!
 
     @Test
     fun parsesPairLinkWithName() {
@@ -66,6 +66,23 @@ class PcListTest {
     }
 
     @Test
+    fun repairingPcAfterTokenRotationReplacesOldEntryInPlace() {
+        val rotated = PcList.parseLink("https://192.168.0.25:8765/api/clip?t=HOME2&fp=$fp")!!
+        val list = PcList().add(home).add(work).activate(work.id).add(rotated)
+        assertEquals(2, list.items.size)
+        assertEquals(listOf(rotated.id, work.id), list.items.map { it.id })  // позиция сохранена
+        assertEquals(rotated.id, list.activeId)
+        assertEquals("Дом", list.items[0].name)  // известное имя не затирается хостом
+        assertFalse(list.items.any { it.id == home.id })
+    }
+
+    @Test
+    fun pcsWithDifferentFingerprintsStayApart() {
+        val list = PcList().add(home).add(work.copy(fp = "c".repeat(64)))
+        assertEquals(2, list.items.size)
+    }
+
+    @Test
     fun switchesActivePc() {
         val list = PcList().add(home).add(work).activate(home.id)
         assertEquals("HOME", list.active?.token)
@@ -89,7 +106,7 @@ class PcListTest {
     @Test
     fun readdingByAddressKeepsKnownName() {
         val named = PcList().add(work).renamed(work.id, "Ноутбук")
-        val again = named.add(PcList.parseLink("https://192.168.0.41:8765/api/clip?t=WORK&fp=$fp")!!)
+        val again = named.add(PcList.parseLink("https://192.168.0.41:8765/api/clip?t=WORK&fp=${"b".repeat(64)}")!!)
         assertEquals("Ноутбук", again.active?.name)
         assertEquals("https://192.168.0.41:8765", again.active?.url)
     }

@@ -404,7 +404,7 @@ def test_old_http_link_from_config_is_shown_as_stale(tmp_path, monkeypatch):
         await pc.start()
         try:
             assert pc.peers.status() == [{"id": config.pc_id("t"), "name": "СТАРЫЙ", "url": "http://192.168.0.40:8765",
-                                          "connected": False, "incoming": False, "stale": True}]
+                                          "connected": False, "incoming": False, "stale": True, "revoked": False}]
         finally:
             await Pc.stop_all()
 
@@ -561,3 +561,38 @@ def test_broadcast_skips_remote_sockets_while_untrusted(tmp_path):
         assert len(mine.sent) == 1 and phone.sent == []
 
     asyncio.run(main())
+
+
+def test_rotated_token_makes_peer_revoked_and_stops_retries_then_relink_replaces_it(run):
+    from phonenect.server import create_app
+
+    async def scenario(a, b):
+        await linked(a, b)
+        old_id = a.peers.items[0].id
+        attempts = []
+        real = a.peers.http.ws_connect
+
+        def counting(*args, **kwargs):
+            attempts.append(1)
+            return real(*args, **kwargs)
+
+        a.peers.http.ws_connect = counting
+        port = b.server.port
+        await b.server.close()
+        b.cfg["token"] = "token-BETA-rotated"  # B отключила все устройства: тот же CA, новый токен
+        b.server = TestServer(create_app(b.hub, b.cfg, "https://x", b.peers, b.cert_dir, b.fp), port=port)
+        await b.server.start_server(ssl=server_ssl(b.cert_dir))
+        peer = a.peers.items[0]
+        await until(lambda: peer.revoked)
+        assert not peer.connected
+        assert [s["revoked"] for s in a.peers.status()] == [True]
+        n = len(attempts)
+        await asyncio.sleep(peers_module.RETRY_DELAY * 2 + 0.5)
+        assert len(attempts) == n  # больше не пытаемся
+        await a.peers.add(b.link)  # свяжите заново: тот же ПК (тот же CA) — старая запись заменяется
+        assert len(a.peers.items) == 1
+        assert a.peers.items[0].id != old_id
+        await until(lambda: a.peers.items[0].connected)
+        assert not a.peers.items[0].revoked
+
+    run(scenario)

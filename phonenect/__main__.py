@@ -100,9 +100,10 @@ def restart_command() -> tuple[list[str], str]:
 REVOKE_LOCK = threading.Lock()
 
 
-def revoke_all_devices(confirm, rotate, spawn, show, quit_, lock=REVOKE_LOCK) -> None:
+def revoke_all_devices(confirm, rotate, spawn, show, quit_, lock=REVOKE_LOCK, halt=lambda: None) -> None:
     """«Отключить все устройства»: после подтверждения процесс обязан остановиться в любом случае,
-    иначе отозванный ключ продолжал бы работать. Всё внешнее передаётся извне (для тестов)."""
+    иначе отозванный ключ продолжал бы работать. halt перестаёт принимать соединения до окна с ошибкой,
+    пока оно открыто, старый ключ не должен работать. Всё внешнее передаётся извне (для тестов)."""
     if not lock.acquire(blocking=False):
         return  # окно уже открыто или отзыв идёт
     if not confirm():
@@ -120,6 +121,10 @@ def revoke_all_devices(confirm, rotate, spawn, show, quit_, lock=REVOKE_LOCK) ->
             problem = "Ключ доступа заменён, но Phonenect не смог перезапуститься — запустите его вручную."
     try:
         if problem:
+            try:
+                halt()
+            except Exception as e:
+                print("Не удалось остановить сервер:", e)
             show(problem)
     finally:
         quit_()  # замок не отпускаем: процесс завершается
@@ -134,6 +139,7 @@ def run_server(hub: Hub, cfg: dict, tls: TlsKeeper, ready: threading.Event, guar
     peers = Peers(hub, cfg, guard)
     runner = web.AppRunner(create_app(hub, cfg, base, peers, tls.dir, tls.fp, guard))
     setup_runner = web.AppRunner(create_setup_app(cfg, tls.dir, tls.fp, base, peers, guard))
+    hub.runners = [runner, setup_runner]  # нужны halt_server: остановить приём соединений
     loop.run_until_complete(runner.setup())
     loop.run_until_complete(setup_runner.setup())
     try:
@@ -150,6 +156,23 @@ def run_server(hub: Hub, cfg: dict, tls: TlsKeeper, ready: threading.Event, guar
     ready.set()
     loop.call_soon(peers.start)
     loop.run_forever()
+
+
+def halt_server(hub: Hub) -> None:
+    """Перестать принимать соединения и обслуживать запросы: закрываем порты и останавливаем цикл сервера."""
+    loop = hub.loop
+    if loop is None or not loop.is_running():
+        return
+
+    async def close_sites() -> None:
+        for runner in getattr(hub, "runners", []):
+            for site in list(runner.sites):
+                await site.stop()
+
+    try:
+        asyncio.run_coroutine_threadsafe(close_sites(), loop).result(timeout=5)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
 
 
 TITLE = "Phonenect — общий буфер"
@@ -296,7 +319,10 @@ def main() -> None:
         # Раз в минуту: сменилась сеть — доверие могло измениться.
         while not stop_tls.wait(60):
             try:
-                if guard.refresh():
+                had_key = "trusted_networks" in cfg
+                changed = guard.refresh()
+                guard.migrate()  # первый запуск без сети: доверяем, как только сеть определится
+                if changed or (not had_key and guard.trusted):
                     network_changed()
             except Exception as e:
                 print("Не удалось определить сеть:", e)
@@ -319,9 +345,13 @@ def main() -> None:
     def send_files(icon, item):
         def work():
             paths = pick_files()
-            if paths:
-                hub.send_files(paths, explicit=True)
-                icon.notify(f"Отправлено на телефоны: {len(paths)} шт.", "Phonenect")
+            if not paths:
+                return
+            if not guard.trusted:
+                icon.notify("Сеть не доверенная — файлы не отправлены. Отметьте сеть доверенной в меню.", "Phonenect")
+                return
+            hub.send_files(paths, explicit=True)
+            icon.notify(f"Отправлено на телефоны: {len(paths)} шт.", "Phonenect")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -368,7 +398,8 @@ def main() -> None:
         def confirm() -> bool:
             return win32api.MessageBox(
                 0,
-                "Все телефоны и связанные ПК потеряют доступ к этому ПК, подключать их придётся заново. Продолжить?",
+                "Все телефоны отключатся от этого ПК, и все связи с другими ПК будут разорваны — "
+                "подключать и связывать придётся заново. Продолжить?",
                 "Phonenect",
                 win32con.MB_YESNO | win32con.MB_ICONWARNING | flags,
             ) == win32con.IDYES
@@ -385,7 +416,8 @@ def main() -> None:
 
         threading.Thread(  # окно блокирует, а меню трея должно жить
             target=revoke_all_devices, daemon=True,
-            args=(confirm, lambda: config.rotate_token(cfg), spawn, show, lambda: quit_app(icon, item)),
+            args=(confirm, lambda: config.rotate_token(cfg), spawn, show, lambda: quit_app(icon, item),
+                  REVOKE_LOCK, lambda: halt_server(hub)),
         ).start()
 
     icon = pystray.Icon(

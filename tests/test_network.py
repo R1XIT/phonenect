@@ -35,11 +35,22 @@ def test_migrate_without_key_trusts_current_network(saved):
     assert guard.trusted
 
 
-def test_migrate_without_detected_network_makes_empty_list(saved):
+def test_migrate_without_detected_network_writes_nothing_until_detected(saved):
     cfg = {}
-    guard_in(cfg, None).migrate()
-    assert cfg["trusted_networks"] == []
-    assert saved == [[]]
+    guard = guard_in(cfg, None)
+    guard.migrate()
+    assert "trusted_networks" not in cfg
+    assert saved == []
+    assert not guard.trusted
+    guard.migrate()  # всё ещё не определилась
+    assert "trusted_networks" not in cfg and saved == []
+    guard.move("Home-5G")
+    guard.migrate()
+    assert cfg["trusted_networks"] == ["Home-5G"]
+    assert saved == [["Home-5G"]]
+    assert guard.trusted
+    guard.migrate()  # ключ уже есть — второй раз не пишем
+    assert saved == [["Home-5G"]]
 
 
 def test_migrate_with_key_does_not_touch_config(saved):

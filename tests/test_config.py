@@ -25,14 +25,17 @@ def test_rotate_token_changes_and_saves(saved):
     assert len(saved) == 1 and saved[0]["token"] == new
 
 
-def test_rotate_token_keeps_other_fields_and_clears_blocked(saved):
+def test_rotate_token_keeps_other_fields_and_clears_blocked_and_peers(saved):
     peers = [{"id": "x", "token": "t"}]
-    cfg = {"token": "old", "port": 9000, "peers": peers, "trusted_networks": ["Home"], "blocked_peers": ["a"]}
+    cfg = {"token": "old", "port": 9000, "setup_port": 9001, "name": "PC", "files_dir": "D:\\f", "peers": peers,
+           "trusted_networks": ["Home"], "blocked_peers": ["a"]}
     config.rotate_token(cfg)
-    assert cfg["port"] == 9000
-    assert cfg["peers"] == peers
+    assert cfg["port"] == 9000 and cfg["setup_port"] == 9001
+    assert cfg["name"] == "PC" and cfg["files_dir"] == "D:\\f"
     assert cfg["trusted_networks"] == ["Home"]
     assert cfg["blocked_peers"] == []
+    assert cfg["peers"] == []
+    assert saved[-1]["peers"] == []
 
 
 def test_rotate_token_writes_config_file(tmp_path, monkeypatch):
@@ -118,7 +121,7 @@ def test_restart_command(monkeypatch):
 
 # ---------- revoke_all_devices ----------
 
-def run_revoke(confirm=True, rotate_exc=None, spawn_exc=None, lock=None):
+def run_revoke(confirm=True, rotate_exc=None, spawn_exc=None, lock=None, halt=False):
     from phonenect.__main__ import revoke_all_devices
 
     log = []
@@ -134,6 +137,8 @@ def run_revoke(confirm=True, rotate_exc=None, spawn_exc=None, lock=None):
             raise spawn_exc
 
     kwargs = {"lock": lock} if lock else {}
+    if halt:
+        kwargs["halt"] = lambda: log.append("halt")
     revoke_all_devices(lambda: confirm, rotate, spawn, lambda t: log.append(("show", t)),
                        lambda: log.append("quit"), **kwargs)
     return log
@@ -186,3 +191,16 @@ def test_revoke_second_click_while_dialog_open_is_ignored():
     release.set()
     t.join(5)
     assert log == ["rotate", "spawn", "quit"]
+
+
+def test_revoke_halts_before_show_and_quit_when_spawn_fails():
+    log = run_revoke(spawn_exc=OSError("x"), lock=threading.Lock(), halt=True)
+    assert log == ["rotate", "spawn", "halt",
+                   ("show", "Ключ доступа заменён, но Phonenect не смог перезапуститься — запустите его вручную."),
+                   "quit"]
+
+
+def test_revoke_halts_before_show_and_quit_when_save_fails():
+    log = run_revoke(rotate_exc=OSError("диск"), lock=threading.Lock(), halt=True)
+    assert log == ["rotate", "halt",
+                   ("show", "Не удалось сохранить новый ключ доступа: диск. Phonenect остановлен."), "quit"]

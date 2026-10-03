@@ -95,6 +95,7 @@ class Peer:
         self.ssl = pinned_ssl(ca)
         self.id = config.pc_id(token)
         self.connected = False
+        self.revoked = False  # тот ПК сменил ключ (401): повторов нет, нужна новая ссылка
         self.tasks: set[asyncio.Task] = set()
         self.outbox: asyncio.Queue[Clip] = asyncio.Queue()  # текст и картинки уходят строго по порядку
         self.downloads = asyncio.Semaphore(1)  # файлы оттуда — по одному, не задерживая текст
@@ -155,6 +156,10 @@ class Peer:
                 if e.status == 403:
                     self.connected = False
                     self.on_refused(self)
+                    return
+                if e.status == 401:  # тот ПК сменил ключ доступа: токен больше не подойдёт, надо связать заново
+                    self.connected = False
+                    self.revoked = True
                     return
             except Exception:
                 pass
@@ -299,9 +304,9 @@ class Peers:
 
     def status(self) -> list[dict]:
         ours = [{"id": p.id, "name": p.name, "url": p.url, "connected": p.connected, "incoming": False,
-                 "stale": False} for p in self.items]
+                 "stale": False, "revoked": p.revoked} for p in self.items]
         ours += [{"id": config.pc_id(p["token"]), "name": p.get("name") or p["url"], "url": p["url"],
-                  "connected": False, "incoming": False, "stale": True} for p in self.stale]
+                  "connected": False, "incoming": False, "stale": True, "revoked": False} for p in self.stale]
         theirs = [{"id": i, "name": name, "url": "", "connected": True, "incoming": True}
                   for i, (name, _) in self.incoming.items() if i not in {p.id for p in self.items}]
         return ours + theirs
@@ -354,9 +359,10 @@ class Peers:
         if info["id"] in self.blocked:  # связываем сами — значит, снова доверяем
             self.blocked.remove(info["id"])
         for p in list(self.items):
-            if p.token == token:  # тот же ПК с новым адресом — заменяем
+            if p.token == token or p.ca == ca:  # тот же ПК: новый адрес или новый токен (CA после смены ключа тот же)
                 self.remove(p)
-        self.stale = [s for s in self.stale if s["token"] != token]  # старая связь с тем же ПК заменяется
+        # старая связь с тем же ПК заменяется
+        self.stale = [s for s in self.stale if s["token"] != token and s.get("ca") != ca]
         peer = self._spawn(url, token, info.get("name") or url, ca)
         self._save()
         return peer

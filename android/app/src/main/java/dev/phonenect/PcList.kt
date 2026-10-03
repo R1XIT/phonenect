@@ -17,12 +17,24 @@ data class PcList(val items: List<Pc> = emptyList(), val activeId: String? = nul
     /** Новый ПК становится активным; уже известный (тот же токен) обновляет адрес и имя. */
     fun add(pc: Pc): PcList {
         val known = items.firstOrNull { it.id == pc.id }
-            ?: return PcList(items + pc, pc.id)
+            ?: return replaceRotated(pc) ?: PcList(items + pc, pc.id)
         // В адресе API имени нет — вместо него хост; известное имя не затираем.
         val name = if (pc.name == hostOf(pc.url)) known.name else pc.name
         // Уже полученный CA сохраняем, если отпечаток тот же; иначе берём CA нового.
         val ca = if (pc.ca.isEmpty() && pc.fp == known.fp) known.ca else pc.ca
         return PcList(items.map { if (it.id == pc.id) pc.copy(name = name, ca = ca) else it }, pc.id)
+    }
+
+    /**
+     * ПК сменил токен («Отключить все устройства»), а CA остался: тот же отпечаток при другом id — тот же ПК.
+     * Старая запись заменяется на месте, а не остаётся рядом отключённой.
+     */
+    private fun replaceRotated(pc: Pc): PcList? {
+        if (pc.fp.isEmpty()) return null
+        val old = items.firstOrNull { it.fp == pc.fp } ?: return null
+        val name = if (pc.name == hostOf(pc.url)) old.name else pc.name
+        val ca = if (pc.ca.isEmpty()) old.ca else pc.ca
+        return PcList(items.map { if (it.id == old.id) pc.copy(name = name, ca = ca) else it }, pc.id)
     }
 
     fun activate(id: String) = if (items.any { it.id == id }) copy(activeId = id) else this

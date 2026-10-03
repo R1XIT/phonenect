@@ -68,9 +68,14 @@ class NetworkGuard:
         config.save(self.cfg)
 
     def migrate(self) -> None:
-        """Первый запуск этой версии: доверяем сети, в которой ПК сейчас, чтобы дома всё продолжало работать."""
+        """Первый запуск этой версии: доверяем сети, в которой ПК сейчас, чтобы дома всё продолжало работать.
+
+        Пока сеть не определилась, ключ не пишем (иначе пустой список остался бы навсегда): повторяется из
+        периодической проверки сети."""
         if "trusted_networks" in self.cfg:
             return
         self.refresh()
-        self.cfg["trusted_networks"] = [self.name] if self.name else []
+        if self.name is None:
+            return
+        self.cfg["trusted_networks"] = [self.name]
         config.save(self.cfg)

@@ -147,6 +147,8 @@
       state.className = "muted";
       state.textContent = p.stale
         ? "старая связь без шифрования — свяжите заново"
+        : p.revoked
+        ? "тот ПК отключил связь — свяжите заново"
         : p.incoming
         ? "связан с вами с того ПК"
         : (p.connected ? "на связи · " : "нет связи · ") + p.url;
